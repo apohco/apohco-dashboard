@@ -1,0 +1,17 @@
+node_modules/
+.env
+.env.*.local
+.env.local
+*.log
+.aws-sam/
+dist/
+build/
+.DS_Store
+Thumbs.db
+
+# Resolved SAM deploy parameters (RDS endpoint, VPC/subnet IDs, secret ARNs) —
+# keep backend/samconfig.toml.example (placeholders) committed instead.
+backend/samconfig.toml
+
+# Claude Code local/user-specific settings
+.claude/settings.local.json

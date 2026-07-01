@@ -1,0 +1,357 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  APOHCO Financial Dashboard backend. Standalone SAM stack — independent of
+  the Full Circle Podcast Tool stack. Provisions the API Gateway REST API
+  and Lambda functions for QBO sync, settings, and financial reports.
+
+Parameters:
+  Stage:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, prod]
+  DbHost:
+    Type: String
+    Description: RDS PostgreSQL endpoint (apohco-dashboard schema, separate from podcast tool DB)
+  DbName:
+    Type: String
+    Default: apohco_dashboard
+  DbCredentialsSecretArn:
+    Type: String
+    Description: Secrets Manager secret ARN holding { "username": "...", "password": "..." } for the DB
+  AppSecretsArn:
+    Type: String
+    Description: >
+      Secrets Manager secret ARN holding QBO app + crypto config:
+      { "qboClientId", "qboClientSecret", "qboRedirectUri", "qboEnvironment" (sandbox|production),
+        "oauthStateSecret", "tokenEncryptionKey" (base64, 32 bytes) }
+  FrontendUrl:
+    Type: String
+    Description: Deployed frontend base URL (e.g. Amplify domain), used for OAuth redirects and CORS
+  VpcSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Subnets (in the existing VPC) the Lambda functions use to reach RDS
+  VpcSecurityGroupIds:
+    Type: List<AWS::EC2::SecurityGroup::Id>
+    Description: Security group(s) allowing the Lambda functions to reach the RDS instance on its port
+
+Globals:
+  Function:
+    Runtime: nodejs20.x
+    Timeout: 30
+    MemorySize: 256
+    CodeUri: ./
+    Environment:
+      Variables:
+        DB_HOST: !Ref DbHost
+        DB_NAME: !Ref DbName
+        DB_CREDENTIALS_SECRET_ARN: !Ref DbCredentialsSecretArn
+        APP_SECRETS_ARN: !Ref AppSecretsArn
+        COGNITO_USER_POOL_ID: !Ref ApohcoUserPool
+        COGNITO_CLIENT_ID: !Ref ApohcoUserPoolClient
+        FRONTEND_URL: !Ref FrontendUrl
+        STAGE: !Ref Stage
+    Policies:
+      - Statement:
+          - Effect: Allow
+            Action: secretsmanager:GetSecretValue
+            Resource:
+              - !Ref DbCredentialsSecretArn
+              - !Ref AppSecretsArn
+      - VPCAccessPolicy: {}
+    VpcConfig:
+      SubnetIds: !Ref VpcSubnetIds
+      SecurityGroupIds: !Ref VpcSecurityGroupIds
+
+Resources:
+  # --- Cognito: invite-only user pool, separate from the podcast tool's pool ---
+  ApohcoUserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub apohco-dashboard-${Stage}
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: true
+        InviteMessageTemplate:
+          EmailSubject: 'Your APOHCO Financial Dashboard account'
+          EmailMessage: >-
+            Your username is {username} and your temporary password is {####}.
+            Sign in at the APOHCO Financial Dashboard to set a new password.
+      UsernameConfiguration:
+        CaseSensitive: false
+      AutoVerifiedAttributes:
+        - email
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 10
+          RequireUppercase: true
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: false
+      Schema:
+        - Name: email
+          AttributeDataType: String
+          Required: true
+          Mutable: true
+        - Name: role
+          AttributeDataType: String
+          Mutable: true
+          # SoftwareAdmin | SoftwareRep | Owner | Manager | TeamMember (see claude.md)
+        - Name: groupId
+          AttributeDataType: String
+          Mutable: true
+          # GroupId (UUID) this user belongs to; blank for platform-level roles
+      LambdaConfig:
+        PostConfirmation: !GetAtt PostConfirmationFunction.Arn
+
+  ApohcoUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      UserPoolId: !Ref ApohcoUserPool
+      ClientName: apohco-dashboard-web
+      GenerateSecret: false
+      ExplicitAuthFlows:
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+      PreventUserExistenceErrors: ENABLED
+      AccessTokenValidity: 60
+      IdTokenValidity: 60
+      RefreshTokenValidity: 30
+      TokenValidityUnits:
+        AccessToken: minutes
+        IdToken: minutes
+        RefreshToken: days
+
+  # Platform-level Cognito Groups (see claude.md "Platform-Level Roles").
+  # Practice-level groups (e.g. "APOHCO_Owner") are created per Group Practice
+  # at Group-creation time, not statically here.
+  SoftwareAdminUserPoolGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      UserPoolId: !Ref ApohcoUserPool
+      GroupName: SoftwareAdmin
+      Description: Full rights across all Groups, all tenants, all settings
+
+  SoftwareRepUserPoolGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      UserPoolId: !Ref ApohcoUserPool
+      GroupName: SoftwareRep
+      Description: Technical onboarding — QBO connections, Group setup
+
+  PostConfirmationFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: postConfirmation
+      Handler: src/functions/auth/postConfirmation/index.handler
+
+  PostConfirmationInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref PostConfirmationFunction
+      Action: lambda:InvokeFunction
+      Principal: cognito-idp.amazonaws.com
+      SourceArn: !GetAtt ApohcoUserPool.Arn
+
+  ApohcoDashboardApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: !Ref Stage
+      Auth:
+        Authorizers:
+          CognitoAuthorizer:
+            UserPoolArn: !GetAtt ApohcoUserPool.Arn
+        DefaultAuthorizer: CognitoAuthorizer
+
+  QboOAuthConnectFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: qboOAuthConnect
+      Handler: src/functions/qbo/qboOAuthConnect/index.handler
+      Events:
+        Connect:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/qbo/connect
+            Method: post
+
+  QboOAuthCallbackFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: qboOAuthCallback
+      Handler: src/functions/qbo/qboOAuthCallback/index.handler
+      Events:
+        Callback:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/qbo/callback
+            Method: get
+            Auth:
+              Authorizer: NONE
+
+  SyncQBODataFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: syncQBOData
+      Handler: src/functions/qbo/syncQBOData/index.handler
+      Timeout: 60
+      Events:
+        Sync:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/qbo/sync
+            Method: post
+
+  ManageGroupsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: manageGroups
+      Handler: src/functions/settings/manageGroups/index.handler
+      Events:
+        Collection:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/settings/groups
+            Method: any
+        Item:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/settings/groups/{groupId}
+            Method: any
+
+  ManageAccountGroupingsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: manageAccountGroupings
+      Handler: src/functions/settings/manageAccountGroupings/index.handler
+      Events:
+        Collection:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/settings/account-groupings
+            Method: any
+        Item:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/settings/account-groupings/{groupingId}
+            Method: any
+
+  ManageChartOfAccountsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: manageChartOfAccounts
+      Handler: src/functions/settings/manageChartOfAccounts/index.handler
+      Events:
+        Collection:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/settings/chart-of-accounts
+            Method: any
+
+  ManageConsolidationGroupsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: manageConsolidationGroups
+      Handler: src/functions/settings/manageConsolidationGroups/index.handler
+      Events:
+        Collection:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/settings/consolidation-groups
+            Method: any
+        Item:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/settings/consolidation-groups/{consolidationGroupId}
+            Method: any
+
+  ManageCashFlowMappingsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: manageCashFlowMappings
+      Handler: src/functions/settings/manageCashFlowMappings/index.handler
+      Events:
+        Collection:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/settings/cash-flow-mappings
+            Method: any
+
+  ManageQBOsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: manageQBOs
+      Handler: src/functions/settings/manageQBOs/index.handler
+      Events:
+        Collection:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/settings/qbos
+            Method: any
+        Item:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/settings/qbos/{qboId}
+            Method: any
+
+  GetProfitAndLossFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: getProfitAndLoss
+      Handler: src/functions/reports/getProfitAndLoss/index.handler
+      Events:
+        Get:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/reports/profit-and-loss
+            Method: post
+
+  GetBalanceSheetFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: getBalanceSheet
+      Handler: src/functions/reports/getBalanceSheet/index.handler
+      Events:
+        Get:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/reports/balance-sheet
+            Method: post
+
+  GetCashFlowFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: getCashFlow
+      Handler: src/functions/reports/getCashFlow/index.handler
+      Events:
+        Get:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/reports/cash-flow
+            Method: post
+
+Outputs:
+  ApiUrl:
+    Description: API Gateway base URL
+    Value: !Sub https://${ApohcoDashboardApi}.execute-api.${AWS::Region}.amazonaws.com/${Stage}
+  UserPoolId:
+    Description: Cognito User Pool ID (for frontend VITE_COGNITO_USER_POOL_ID and admin CLI commands)
+    Value: !Ref ApohcoUserPool
+  UserPoolClientId:
+    Description: Cognito App Client ID (for frontend VITE_COGNITO_CLIENT_ID)
+    Value: !Ref ApohcoUserPoolClient
