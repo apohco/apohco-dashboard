@@ -18,13 +18,13 @@ Parameters:
     Default: apohco_dashboard
   DbCredentialsSecretArn:
     Type: String
-    Description: Secrets Manager secret ARN holding { "username": "...", "password": "..." } for the DB
+    Description: 'Secrets Manager secret ARN holding {"username": "...", "password": "..."} for the DB'
   AppSecretsArn:
     Type: String
-    Description: >
-      Secrets Manager secret ARN holding QBO app + crypto config:
-      { "qboClientId", "qboClientSecret", "qboRedirectUri", "qboEnvironment" (sandbox|production),
-        "oauthStateSecret", "tokenEncryptionKey" (base64, 32 bytes) }
+    Description: >-
+      Secrets Manager secret ARN holding QBO app + crypto config: qboClientId,
+      qboClientSecret, qboRedirectUri, qboEnvironment (sandbox|production),
+      oauthStateSecret, tokenEncryptionKey (base64, 32 bytes)
   FrontendUrl:
     Type: String
     Description: Deployed frontend base URL (e.g. Amplify domain), used for OAuth redirects and CORS
@@ -47,18 +47,8 @@ Globals:
         DB_NAME: !Ref DbName
         DB_CREDENTIALS_SECRET_ARN: !Ref DbCredentialsSecretArn
         APP_SECRETS_ARN: !Ref AppSecretsArn
-        COGNITO_USER_POOL_ID: !Ref ApohcoUserPool
-        COGNITO_CLIENT_ID: !Ref ApohcoUserPoolClient
         FRONTEND_URL: !Ref FrontendUrl
         STAGE: !Ref Stage
-    Policies:
-      - Statement:
-          - Effect: Allow
-            Action: secretsmanager:GetSecretValue
-            Resource:
-              - !Ref DbCredentialsSecretArn
-              - !Ref AppSecretsArn
-      - VPCAccessPolicy: {}
     VpcConfig:
       SubnetIds: !Ref VpcSubnetIds
       SecurityGroupIds: !Ref VpcSecurityGroupIds
@@ -143,6 +133,14 @@ Resources:
     Properties:
       FunctionName: postConfirmation
       Handler: src/functions/auth/postConfirmation/index.handler
+      Policies: &lambdaPolicies
+        - Statement:
+            - Effect: Allow
+              Action: secretsmanager:GetSecretValue
+              Resource:
+                - !Ref DbCredentialsSecretArn
+                - !Ref AppSecretsArn
+        - VPCAccessPolicy: {}
 
   PostConfirmationInvokePermission:
     Type: AWS::Lambda::Permission
@@ -167,6 +165,16 @@ Resources:
     Properties:
       FunctionName: qboOAuthConnect
       Handler: src/functions/qbo/qboOAuthConnect/index.handler
+      Policies: *lambdaPolicies
+      # Cognito env vars are added per-function (not in Globals) to avoid a
+      # circular dependency: ApohcoUserPool's PostConfirmation trigger
+      # references PostConfirmationFunction, which must NOT in turn
+      # reference ApohcoUserPool/ApohcoUserPoolClient (it doesn't need to —
+      # it's invoked directly by Cognito, not via API Gateway auth).
+      Environment: &cognitoAuthEnv
+        Variables:
+          COGNITO_USER_POOL_ID: !Ref ApohcoUserPool
+          COGNITO_CLIENT_ID: !Ref ApohcoUserPoolClient
       Events:
         Connect:
           Type: Api
@@ -180,6 +188,7 @@ Resources:
     Properties:
       FunctionName: qboOAuthCallback
       Handler: src/functions/qbo/qboOAuthCallback/index.handler
+      Policies: *lambdaPolicies
       Events:
         Callback:
           Type: Api
@@ -196,6 +205,8 @@ Resources:
       FunctionName: syncQBOData
       Handler: src/functions/qbo/syncQBOData/index.handler
       Timeout: 60
+      Policies: *lambdaPolicies
+      Environment: *cognitoAuthEnv
       Events:
         Sync:
           Type: Api
@@ -209,6 +220,8 @@ Resources:
     Properties:
       FunctionName: manageGroups
       Handler: src/functions/settings/manageGroups/index.handler
+      Policies: *lambdaPolicies
+      Environment: *cognitoAuthEnv
       Events:
         Collection:
           Type: Api
@@ -228,6 +241,8 @@ Resources:
     Properties:
       FunctionName: manageAccountGroupings
       Handler: src/functions/settings/manageAccountGroupings/index.handler
+      Policies: *lambdaPolicies
+      Environment: *cognitoAuthEnv
       Events:
         Collection:
           Type: Api
@@ -247,6 +262,8 @@ Resources:
     Properties:
       FunctionName: manageChartOfAccounts
       Handler: src/functions/settings/manageChartOfAccounts/index.handler
+      Policies: *lambdaPolicies
+      Environment: *cognitoAuthEnv
       Events:
         Collection:
           Type: Api
@@ -260,6 +277,8 @@ Resources:
     Properties:
       FunctionName: manageConsolidationGroups
       Handler: src/functions/settings/manageConsolidationGroups/index.handler
+      Policies: *lambdaPolicies
+      Environment: *cognitoAuthEnv
       Events:
         Collection:
           Type: Api
@@ -279,6 +298,8 @@ Resources:
     Properties:
       FunctionName: manageCashFlowMappings
       Handler: src/functions/settings/manageCashFlowMappings/index.handler
+      Policies: *lambdaPolicies
+      Environment: *cognitoAuthEnv
       Events:
         Collection:
           Type: Api
@@ -292,6 +313,8 @@ Resources:
     Properties:
       FunctionName: manageQBOs
       Handler: src/functions/settings/manageQBOs/index.handler
+      Policies: *lambdaPolicies
+      Environment: *cognitoAuthEnv
       Events:
         Collection:
           Type: Api
@@ -311,6 +334,8 @@ Resources:
     Properties:
       FunctionName: getProfitAndLoss
       Handler: src/functions/reports/getProfitAndLoss/index.handler
+      Policies: *lambdaPolicies
+      Environment: *cognitoAuthEnv
       Events:
         Get:
           Type: Api
@@ -324,6 +349,8 @@ Resources:
     Properties:
       FunctionName: getBalanceSheet
       Handler: src/functions/reports/getBalanceSheet/index.handler
+      Policies: *lambdaPolicies
+      Environment: *cognitoAuthEnv
       Events:
         Get:
           Type: Api
@@ -337,6 +364,8 @@ Resources:
     Properties:
       FunctionName: getCashFlow
       Handler: src/functions/reports/getCashFlow/index.handler
+      Policies: *lambdaPolicies
+      Environment: *cognitoAuthEnv
       Events:
         Get:
           Type: Api

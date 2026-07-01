@@ -1,21 +1,18 @@
 version = 0.1
 
+# parameter_overrides uses the space-separated string format, not a TOML
+# list of "Key=Value" strings — list-style entries need backslash-escaped
+# commas for CommaDelimitedList params (VpcSubnetIds), and that escaping
+# is not reliably stripped by SAM CLI. The string form avoids the issue
+# entirely since comma isn't a delimiter in that format.
+
 [default.deploy.parameters]
 stack_name = "apohco-dashboard"
 region = "us-east-2"
 confirm_changeset = true
 capabilities = "CAPABILITY_IAM"
 resolve_s3 = true
-parameter_overrides = [
-  "Stage=dev",
-  "DbHost=REPLACE_WITH_RDS_ENDPOINT",
-  "DbName=apohco_dashboard",
-  "DbCredentialsSecretArn=REPLACE_WITH_DB_CREDENTIALS_SECRET_ARN",
-  "AppSecretsArn=REPLACE_WITH_APP_SECRETS_ARN",
-  "FrontendUrl=REPLACE_WITH_FRONTEND_URL",
-  "VpcSubnetIds=REPLACE_WITH_SUBNET_IDS",
-  "VpcSecurityGroupIds=REPLACE_WITH_SECURITY_GROUP_IDS",
-]
+parameter_overrides = "Stage=dev DbHost=REPLACE_WITH_RDS_ENDPOINT DbName=apohco_dashboard DbCredentialsSecretArn=REPLACE_WITH_DB_CREDENTIALS_SECRET_ARN AppSecretsArn=REPLACE_WITH_APP_SECRETS_ARN FrontendUrl=REPLACE_WITH_FRONTEND_URL VpcSubnetIds=REPLACE_WITH_SUBNET_ID_1,REPLACE_WITH_SUBNET_ID_2 VpcSecurityGroupIds=REPLACE_WITH_SECURITY_GROUP_ID"
 
 [prod.deploy.parameters]
 stack_name = "apohco-dashboard-prod"
@@ -23,13 +20,4 @@ region = "us-east-2"
 confirm_changeset = true
 capabilities = "CAPABILITY_IAM"
 resolve_s3 = true
-parameter_overrides = [
-  "Stage=prod",
-  "DbHost=REPLACE_WITH_RDS_ENDPOINT",
-  "DbName=apohco_dashboard",
-  "DbCredentialsSecretArn=REPLACE_WITH_DB_CREDENTIALS_SECRET_ARN",
-  "AppSecretsArn=REPLACE_WITH_APP_SECRETS_ARN",
-  "FrontendUrl=REPLACE_WITH_FRONTEND_URL",
-  "VpcSubnetIds=REPLACE_WITH_SUBNET_IDS",
-  "VpcSecurityGroupIds=REPLACE_WITH_SECURITY_GROUP_IDS",
-]
+parameter_overrides = "Stage=prod DbHost=REPLACE_WITH_RDS_ENDPOINT DbName=apohco_dashboard DbCredentialsSecretArn=REPLACE_WITH_DB_CREDENTIALS_SECRET_ARN AppSecretsArn=REPLACE_WITH_APP_SECRETS_ARN FrontendUrl=REPLACE_WITH_FRONTEND_URL VpcSubnetIds=REPLACE_WITH_SUBNET_ID_1,REPLACE_WITH_SUBNET_ID_2 VpcSecurityGroupIds=REPLACE_WITH_SECURITY_GROUP_ID"
