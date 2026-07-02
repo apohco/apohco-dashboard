@@ -14,13 +14,16 @@ import {
   Button,
   Alert,
   IconButton,
+  Select,
+  MenuItem,
 } from '@mui/material';
 import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline';
-import { useAuth } from '../../context/AuthContext';
+import useEffectiveGroup from '../../hooks/useEffectiveGroup';
 import { listQBOs, deleteQBO, startQBOConnect } from '../../api/settings';
 
 export default function QBOSetup() {
-  const { groupId } = useAuth();
+  const { groupId, needsGroupSelector, groups, groupsError, selectedGroupId, setSelectedGroupId } =
+    useEffectiveGroup();
   const [searchParams] = useSearchParams();
   const [qbos, setQbos] = useState([]);
   const [error, setError] = useState(null);
@@ -29,7 +32,10 @@ export default function QBOSetup() {
   const [connecting, setConnecting] = useState(false);
 
   const refresh = () => {
-    if (!groupId) return;
+    if (!groupId) {
+      setQbos([]);
+      return;
+    }
     listQBOs(groupId).then(setQbos).catch(setError);
   };
 
@@ -59,6 +65,30 @@ export default function QBOSetup() {
         QBO API Setup
       </Typography>
 
+      {needsGroupSelector && (
+        <Select
+          size="small"
+          displayEmpty
+          value={selectedGroupId}
+          onChange={(e) => setSelectedGroupId(e.target.value)}
+          sx={{ mb: 2, minWidth: 280 }}
+        >
+          <MenuItem value="" disabled>
+            Select a Group
+          </MenuItem>
+          {groups.map((g) => (
+            <MenuItem key={g.groupid} value={g.groupid}>
+              {g.groupname}
+            </MenuItem>
+          ))}
+        </Select>
+      )}
+      {groupsError && (
+        <Alert severity="error" sx={{ mb: 2 }}>
+          Couldn't load Groups: {groupsError.response?.data?.message || groupsError.message}
+        </Alert>
+      )}
+
       {searchParams.get('connected') && (
         <Alert severity="success" sx={{ mb: 2 }}>
           QBO connected successfully.
@@ -75,56 +105,62 @@ export default function QBOSetup() {
         </Alert>
       )}
 
-      <Paper variant="outlined" sx={{ mb: 3 }}>
-        <List dense>
-          {qbos.map((q) => (
-            <ListItem
-              key={q.qboid}
-              secondaryAction={
-                <IconButton edge="end" onClick={() => handleDelete(q.qboid)}>
-                  <DeleteOutlineIcon fontSize="small" />
-                </IconButton>
-              }
-            >
-              <ListItemText
-                primary={q.qboname}
-                secondary={`Realm ${q.realmid}${q.classes?.length ? ` • ${q.classes.length} classes` : ''}`}
-              />
-              {q.isclassbased && <Chip size="small" label="Class-based" sx={{ mr: 2 }} />}
-            </ListItem>
-          ))}
-          {qbos.length === 0 && (
-            <ListItem>
-              <ListItemText secondary="No QBOs connected yet." />
-            </ListItem>
-          )}
-        </List>
-      </Paper>
+      {needsGroupSelector && !groupId ? (
+        <Typography color="text.secondary">Select a Group above to manage its QBO connections.</Typography>
+      ) : (
+        <>
+          <Paper variant="outlined" sx={{ mb: 3 }}>
+            <List dense>
+              {qbos.map((q) => (
+                <ListItem
+                  key={q.qboid}
+                  secondaryAction={
+                    <IconButton edge="end" onClick={() => handleDelete(q.qboid)}>
+                      <DeleteOutlineIcon fontSize="small" />
+                    </IconButton>
+                  }
+                >
+                  <ListItemText
+                    primary={q.qboname}
+                    secondary={`Realm ${q.realmid}${q.classes?.length ? ` • ${q.classes.length} classes` : ''}`}
+                  />
+                  {q.isclassbased && <Chip size="small" label="Class-based" sx={{ mr: 2 }} />}
+                </ListItem>
+              ))}
+              {qbos.length === 0 && (
+                <ListItem>
+                  <ListItemText secondary="No QBOs connected yet." />
+                </ListItem>
+              )}
+            </List>
+          </Paper>
 
-      <Paper variant="outlined" sx={{ p: 3, maxWidth: 480 }}>
-        <Typography variant="h6" sx={{ mb: 2 }}>
-          Connect a new QBO
-        </Typography>
-        <TextField
-          fullWidth
-          size="small"
-          label="QBO Name"
-          placeholder="e.g. APOHCO Parent"
-          value={newQboName}
-          onChange={(e) => setNewQboName(e.target.value)}
-          sx={{ mb: 2 }}
-        />
-        <FormControlLabel
-          control={
-            <Checkbox checked={newIsClassBased} onChange={(e) => setNewIsClassBased(e.target.checked)} />
-          }
-          label="This QBO uses Classes for locations"
-          sx={{ mb: 2, display: 'block' }}
-        />
-        <Button variant="contained" disabled={!newQboName || connecting} onClick={handleConnect}>
-          {connecting ? 'Redirecting to QuickBooks...' : 'Connect to QuickBooks'}
-        </Button>
-      </Paper>
+          <Paper variant="outlined" sx={{ p: 3, maxWidth: 480 }}>
+            <Typography variant="h6" sx={{ mb: 2 }}>
+              Connect a new QBO
+            </Typography>
+            <TextField
+              fullWidth
+              size="small"
+              label="QBO Name"
+              placeholder="e.g. APOHCO Parent"
+              value={newQboName}
+              onChange={(e) => setNewQboName(e.target.value)}
+              sx={{ mb: 2 }}
+            />
+            <FormControlLabel
+              control={
+                <Checkbox checked={newIsClassBased} onChange={(e) => setNewIsClassBased(e.target.checked)} />
+              }
+              label="This QBO uses Classes for locations"
+              sx={{ mb: 2, display: 'block' }}
+            />
+            <Button variant="contained" disabled={!newQboName || connecting} onClick={handleConnect}>
+              {connecting ? 'Redirecting to QuickBooks...' : 'Connect to QuickBooks'}
+            </Button>
+          </Paper>
+        </>
+      )}
     </Box>
   );
 }
