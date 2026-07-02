@@ -114,26 +114,52 @@ async function getGeneralLedgerReport(realmId, accessToken, startDate, endDate) 
   return apiGet(realmId, `/reports/GeneralLedger?${params.toString()}`, accessToken);
 }
 
+// Builds a lookup from a QBO GeneralLedger report's per-account section
+// label back to the AccountCode/AccountName stored in
+// ChartOfAccountsMappings. Report section headers are keyed by the
+// account's *entity Id* when QBO includes one (id:<accountId>), and
+// otherwise by the exact display label QBO renders for that account —
+// "<AcctNum> <Name>" if account numbering is enabled for the company,
+// or just "<Name>" if it isn't. Relying on the label's *text* alone (e.g.
+// splitting on the first space) breaks for any company without account
+// numbering enabled, since multi-word account names like "Accounts
+// Payable (A/P)" get mangled into a fake code.
+function buildAccountLookup(accounts) {
+  const lookup = new Map();
+  for (const account of accounts) {
+    const code = account.AcctNum || account.Id;
+    const entry = { code, name: account.Name };
+    lookup.set(`id:${account.Id}`, entry);
+    const label = account.AcctNum ? `${account.AcctNum} ${account.Name}` : account.Name;
+    lookup.set(`label:${label}`, entry);
+  }
+  return lookup;
+}
+
 // QBO's GeneralLedger report nests transaction rows inside a "Section" row
-// per account (Header.ColData[0].value holds the account label, commonly
-// formatted as "<code> <name>", e.g. "502050 Admin Salaries"). This walks
-// the tree and flattens it into one row per transaction line.
-function flattenGeneralLedgerReport(report) {
+// per account. `accountLookup` (see buildAccountLookup) resolves each
+// section back to a stable AccountCode/AccountName; sections QBO doesn't
+// give an id for, or whose label doesn't match a known account, fall back
+// to the raw label with a null code (still visible in reports, just
+// "Ungrouped" until reconciled).
+function flattenGeneralLedgerReport(report, accountLookup) {
   const columns = (report.Columns?.Column || []).map((c) => c.ColType);
   const colIndex = (type) => columns.indexOf(type);
   const rows = [];
 
-  function splitAccountLabel(label) {
-    const match = /^(\S+)\s+(.+)$/.exec(label || '');
-    return match ? { code: match[1], name: match[2] } : { code: null, name: label || null };
+  function resolveAccount(headerColData) {
+    const label = headerColData?.[0]?.value;
+    const id = headerColData?.[0]?.id;
+    if (id && accountLookup.has(`id:${id}`)) return accountLookup.get(`id:${id}`);
+    if (label && accountLookup.has(`label:${label}`)) return accountLookup.get(`label:${label}`);
+    return { code: null, name: label || null };
   }
 
   function walk(node, currentAccount) {
     const sectionRows = node.Rows?.Row || [];
     for (const row of sectionRows) {
       if (row.type === 'Section') {
-        const label = row.Header?.ColData?.[0]?.value;
-        const account = label ? splitAccountLabel(label) : currentAccount;
+        const account = row.Header?.ColData ? resolveAccount(row.Header.ColData) : currentAccount;
         walk(row, account);
       } else if (row.ColData && currentAccount) {
         const get = (type) => {
@@ -172,4 +198,5 @@ module.exports = {
   queryClasses,
   getGeneralLedgerReport,
   flattenGeneralLedgerReport,
+  buildAccountLookup,
 };

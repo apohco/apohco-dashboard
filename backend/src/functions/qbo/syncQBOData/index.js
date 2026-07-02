@@ -9,6 +9,7 @@ const {
   queryClasses,
   getGeneralLedgerReport,
   flattenGeneralLedgerReport,
+  buildAccountLookup,
 } = require('../../../shared/qboClient');
 
 const TOKEN_REFRESH_BUFFER_MS = 5 * 60 * 1000; // refresh if expiring within 5 minutes
@@ -57,7 +58,9 @@ async function syncClasses(qboId, realmId, accessToken) {
 // Upserts the Chart of Accounts without disturbing existing Grouping
 // assignments made in the Chart of Accounts Setup screen (Phase 2) — new
 // accounts appear with a NULL GroupingId, matching the "reconcile" behavior
-// described in claude.md.
+// described in claude.md. Also returns a lookup used to resolve the
+// GeneralLedger report's per-account sections back to these same codes
+// (see buildAccountLookup).
 async function syncChartOfAccounts(groupId, qboId, realmId, accessToken) {
   const accounts = await queryAccounts(realmId, accessToken);
 
@@ -73,11 +76,22 @@ async function syncChartOfAccounts(groupId, qboId, realmId, accessToken) {
       [groupId, qboId, accountCode, account.Name, account.Classification || null]
     );
   }
+
+  return buildAccountLookup(accounts);
 }
 
-async function syncTransactions(groupId, qbo, realmId, accessToken, startDate, endDate, classNameToId) {
+async function syncTransactions(
+  groupId,
+  qbo,
+  realmId,
+  accessToken,
+  startDate,
+  endDate,
+  classNameToId,
+  accountLookup
+) {
   const report = await getGeneralLedgerReport(realmId, accessToken, startDate, endDate);
-  const rows = flattenGeneralLedgerReport(report);
+  const rows = flattenGeneralLedgerReport(report, accountLookup);
 
   await withTransaction(async (client) => {
     await client.query(
@@ -149,7 +163,7 @@ exports.handler = withErrorHandling(async (event) => {
     classNameToId = await syncClasses(qbo.qboid, qbo.realmid, accessToken);
   }
 
-  await syncChartOfAccounts(qbo.groupid, qbo.qboid, qbo.realmid, accessToken);
+  const accountLookup = await syncChartOfAccounts(qbo.groupid, qbo.qboid, qbo.realmid, accessToken);
 
   const transactionsSynced = await syncTransactions(
     qbo.groupid,
@@ -158,7 +172,8 @@ exports.handler = withErrorHandling(async (event) => {
     accessToken,
     startDate,
     endDate,
-    classNameToId
+    classNameToId,
+    accountLookup
   );
 
   return json(200, {
