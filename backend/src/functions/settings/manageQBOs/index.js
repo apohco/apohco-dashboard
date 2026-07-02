@@ -1,3 +1,4 @@
+const { v4: uuidv4 } = require('uuid');
 const { requireAuth } = require('../../../shared/verifyToken');
 const { requireRole, requireGroupAccess } = require('../../../shared/authorize');
 const { query } = require('../../../shared/db');
@@ -5,6 +6,8 @@ const { json, withErrorHandling } = require('../../../shared/response');
 
 // /api/settings/qbos       GET   (any authenticated role in the Group — also used
 //                                 to populate entity selectors on report pages)
+//                          POST  (SoftwareRep/SoftwareAdmin only) — create a QBO
+//                                 record without the OAuth flow, for Manual Upload
 // /api/settings/qbos/{id}  PATCH, DELETE (SoftwareRep/SoftwareAdmin only, per
 //                                 claude.md's QBO API Setup section)
 exports.handler = withErrorHandling(async (event) => {
@@ -22,7 +25,8 @@ exports.handler = withErrorHandling(async (event) => {
       requireGroupAccess(claims, groupId);
 
       const { rows: qbos } = await query(
-        `SELECT QBOId, QBOName, RealmId, IsClassBased, CreatedDate
+        `SELECT QBOId, QBOName, RealmId, IsClassBased, CreatedDate,
+                (AccessToken IS NOT NULL) AS IsApiConnected
          FROM QBOs WHERE GroupId = $1 ORDER BY QBOName`,
         [groupId]
       );
@@ -36,6 +40,47 @@ exports.handler = withErrorHandling(async (event) => {
       }
 
       return json(200, qbos);
+    }
+
+    case 'POST': {
+      requireRole(claims, ['SoftwareRep', 'SoftwareAdmin']);
+      const { groupId, qboName, isClassBased, classNames } = JSON.parse(event.body || '{}');
+      if (!groupId || !qboName) {
+        const err = new Error('groupId and qboName are required');
+        err.statusCode = 400;
+        throw err;
+      }
+      requireGroupAccess(claims, groupId);
+
+      // No OAuth tokens for a manually-created QBO — RealmId is NOT NULL/
+      // UNIQUE(GroupId, RealmId) though, so synthesize a placeholder that
+      // can never collide with a real QBO realm ID.
+      const syntheticRealmId = `MANUAL-${uuidv4()}`;
+
+      const { rows } = await query(
+        `INSERT INTO QBOs (GroupId, QBOName, RealmId, IsClassBased, CreatedBy)
+         VALUES ($1, $2, $3, $4, $5)
+         RETURNING QBOId, QBOName, RealmId, IsClassBased, CreatedDate,
+                   (AccessToken IS NOT NULL) AS IsApiConnected`,
+        [groupId, qboName, syntheticRealmId, Boolean(isClassBased), claims.userId]
+      );
+      const qbo = rows[0];
+
+      qbo.classes = [];
+      if (isClassBased && Array.isArray(classNames)) {
+        for (const className of classNames) {
+          const name = String(className).trim();
+          if (!name) continue;
+          const { rows: classRows } = await query(
+            `INSERT INTO QBOClasses (QBOId, ClassName, ClassId) VALUES ($1, $2, $3)
+             RETURNING QBOClassId, ClassName, ClassId`,
+            [qbo.qboid, name, `MANUAL-${uuidv4()}`]
+          );
+          qbo.classes.push(classRows[0]);
+        }
+      }
+
+      return json(201, qbo);
     }
 
     case 'PATCH': {
@@ -53,7 +98,8 @@ exports.handler = withErrorHandling(async (event) => {
            QBOName = COALESCE($1, QBOName),
            IsClassBased = COALESCE($2, IsClassBased)
          WHERE QBOId = $3 AND GroupId = $4
-         RETURNING QBOId, QBOName, RealmId, IsClassBased, CreatedDate`,
+         RETURNING QBOId, QBOName, RealmId, IsClassBased, CreatedDate,
+                   (AccessToken IS NOT NULL) AS IsApiConnected`,
         [qboName ?? null, typeof isClassBased === 'boolean' ? isClassBased : null, qboId, groupId]
       );
       if (!rows.length) {

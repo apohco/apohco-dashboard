@@ -1,3 +1,4 @@
+import axios from 'axios';
 import apiClient from './client';
 
 // Groups (Group Practices / tenants) — SoftwareAdmin only
@@ -85,3 +86,26 @@ export const startQBOConnect = (groupId, qboName, isClassBased) =>
 
 export const syncQBOData = (qboId, startDate, endDate) =>
   apiClient.post('/api/qbo/sync', { qboId, startDate, endDate }).then((r) => r.data);
+
+export const createQBOManually = (groupId, qboName, isClassBased, classNames) =>
+  apiClient
+    .post('/api/settings/qbos', { groupId, qboName, isClassBased, classNames })
+    .then((r) => r.data);
+
+// Manual Upload (CSV/Excel)
+export const presignManualUpload = (qboId, fileName) =>
+  apiClient.post('/api/qbo/manual-upload/presign', { qboId, fileName }).then((r) => r.data);
+
+// Direct PUT to S3 via the presigned URL — deliberately bypasses apiClient
+// so our Cognito bearer token isn't attached (S3 presigned URLs sign the
+// request themselves; an extra Authorization header would break it).
+export const uploadFileToS3 = (uploadUrl, file, contentType) =>
+  axios.put(uploadUrl, file, { headers: { 'Content-Type': contentType } });
+
+export const previewManualUpload = (qboId, s3Key) =>
+  apiClient.post('/api/qbo/manual-upload/preview', { qboId, s3Key }).then((r) => r.data);
+
+export const confirmManualUpload = (qboId, s3Key, startDate, endDate) =>
+  apiClient
+    .post('/api/qbo/manual-upload/confirm', { qboId, s3Key, startDate, endDate })
+    .then((r) => r.data);

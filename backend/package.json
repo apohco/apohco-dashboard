@@ -10,10 +10,15 @@
     "db:migrate": "node src/db/migrate.js"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.699.0",
     "@aws-sdk/client-secrets-manager": "^3.699.0",
+    "@aws-sdk/s3-request-presigner": "^3.699.0",
     "aws-jwt-verify": "^4.0.1",
     "axios": "^1.7.7",
-    "pg": "^8.13.1"
+    "csv-parse": "^5.6.0",
+    "pg": "^8.13.1",
+    "uuid": "^11.0.3",
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "eslint": "^8.57.1"

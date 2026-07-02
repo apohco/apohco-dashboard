@@ -11,6 +11,6 @@ The rest are GroupId-scoped:
 - `manageChartOfAccounts` — `/api/settings/chart-of-accounts` (GET, PUT). Reads the list `syncQBOData` keeps reconciled; PUT saves Grouping assignments. Owner/Manager for writes.
 - `manageConsolidationGroups` — `/api/settings/consolidation-groups` (GET, POST) and `/{consolidationGroupId}` (PUT, DELETE). Full CRUD including QBO/class membership. Owner/Manager for writes.
 - `manageCashFlowMappings` — `/api/settings/cash-flow-mappings` (GET, PUT). Assigns P&L/Balance Sheet Groupings to Operations/Investing/Financing. Owner/Manager for writes.
-- `manageQBOs` — `/api/settings/qbos` (GET, any role — also feeds report entity selectors) and `/{qboId}` (PATCH, DELETE, SoftwareRep/SoftwareAdmin only).
+- `manageQBOs` — `/api/settings/qbos` (GET, any role — also feeds report entity selectors; POST, SoftwareRep/SoftwareAdmin only — creates a QBO row with no OAuth tokens, for Manual Upload, optionally with class names if `isClassBased`) and `/{qboId}` (PATCH, DELETE, SoftwareRep/SoftwareAdmin only). GET now also returns `IsApiConnected` (`AccessToken IS NOT NULL`) so the frontend can distinguish API-connected vs. manually-created QBOs.
 
 OAuth connection setup itself lives in `../qbo` (`qboOAuthConnect`, `qboOAuthCallback`, `syncQBOData`).

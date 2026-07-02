@@ -128,6 +128,35 @@ Resources:
       GroupName: SoftwareRep
       Description: Technical onboarding — QBO connections, Group setup
 
+  # Temporary holding area for Manual Upload CSV/Excel files — uploaded via
+  # a presigned URL, parsed and deleted by manualUpload, with a 1-day
+  # lifecycle rule as a backstop in case explicit cleanup fails.
+  UploadsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub apohco-dashboard-uploads-${Stage}-${AWS::AccountId}
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireUploadsAfter1Day
+            Status: Enabled
+            ExpirationInDays: 1
+      CorsConfiguration:
+        CorsRules:
+          - AllowedMethods: [PUT]
+            AllowedOrigins:
+              - !Ref FrontendUrl
+            AllowedHeaders: ['*']
+            MaxAge: 3000
+
   PostConfirmationFunction:
     Type: AWS::Serverless::Function
     Properties:
@@ -218,6 +247,53 @@ Resources:
           Properties:
             RestApiId: !Ref ApohcoDashboardApi
             Path: /api/qbo/sync
+            Method: post
+
+  ManualUploadFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: manualUpload
+      Handler: src/functions/qbo/manualUpload/index.handler
+      Timeout: 60
+      MemorySize: 512
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: secretsmanager:GetSecretValue
+              Resource:
+                - !Ref DbCredentialsSecretArn
+                - !Ref AppSecretsArn
+        - VPCAccessPolicy: {}
+        - Statement:
+            - Effect: Allow
+              Action:
+                - s3:PutObject
+                - s3:GetObject
+                - s3:DeleteObject
+              Resource: !Sub '${UploadsBucket.Arn}/*'
+      Environment:
+        Variables:
+          COGNITO_USER_POOL_ID: !Ref ApohcoUserPool
+          COGNITO_CLIENT_ID: !Ref ApohcoUserPoolClient
+          UPLOADS_BUCKET: !Ref UploadsBucket
+      Events:
+        Presign:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/qbo/manual-upload/presign
+            Method: post
+        Preview:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/qbo/manual-upload/preview
+            Method: post
+        Confirm:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/qbo/manual-upload/confirm
             Method: post
 
   ManageGroupsFunction:
