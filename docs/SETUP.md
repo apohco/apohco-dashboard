@@ -207,3 +207,16 @@ Group membership).
 4. Deploy. Once you have the Amplify domain, update the backend's
    `FrontendUrl` parameter (section 3) and redeploy the SAM stack — it's used
    for the QBO OAuth callback redirect and CORS.
+5. **Add a SPA rewrite rule** (Console → App settings → Rewrites and
+   redirects, or `aws amplify update-app --custom-rules ...`) — without this,
+   Amplify 404s on any client-side route (e.g. `/settings/qbo-setup`) because
+   it only serves files that actually exist in the build output. This isn't
+   part of `amplify.yml` (that's the build spec, not routing config), so it
+   has to be set on the app separately:
+   ```json
+   [{
+     "source": "</^[^.]+$|\\.(?!(css|gif|ico|jpg|jpeg|js|png|txt|svg|woff|woff2|ttf|map|json)$)([^.]+$)/>",
+     "target": "/index.html",
+     "status": "200"
+   }]
+   ```
