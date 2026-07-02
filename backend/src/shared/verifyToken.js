@@ -40,6 +40,10 @@ async function requireAuth(event) {
   try {
     payload = await getVerifier().verify(token);
   } catch (err) {
+    // The client only ever sees "Invalid or expired token" (401), but the
+    // real cause (bad signature vs. expiry vs. a network failure fetching
+    // the JWKS, e.g. no VPC internet egress) is logged here for CloudWatch.
+    console.error('JWT verification failed:', err);
     const authErr = new Error('Invalid or expired token');
     authErr.statusCode = 401;
     throw authErr;

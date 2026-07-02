@@ -159,6 +159,11 @@ Resources:
           CognitoAuthorizer:
             UserPoolArn: !GetAtt ApohcoUserPool.Arn
         DefaultAuthorizer: CognitoAuthorizer
+        AddDefaultAuthorizerToCorsPreflight: false
+      Cors:
+        AllowOrigin: !Sub "'${FrontendUrl}'"
+        AllowHeaders: "'Content-Type,Authorization'"
+        AllowMethods: "'GET,POST,PUT,PATCH,DELETE,OPTIONS'"
 
   QboOAuthConnectFunction:
     Type: AWS::Serverless::Function

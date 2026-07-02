@@ -5,6 +5,15 @@ version = 0.1
 # commas for CommaDelimitedList params (VpcSubnetIds), and that escaping
 # is not reliably stripped by SAM CLI. The string form avoids the issue
 # entirely since comma isn't a delimiter in that format.
+#
+# VpcSubnetIds MUST be private subnets with a route to a NAT Gateway (or
+# equivalent internet egress) — not the VPC's public subnets. These Lambda
+# functions need outbound internet access (Cognito JWKS fetch for JWT
+# verification, Secrets Manager, and the QBO/Intuit API), which a public
+# subnet alone does NOT provide to a Lambda ENI (no public IP == no usable
+# route via an Internet Gateway). VpcSecurityGroupIds is the Lambda-only
+# security group; it does not need to be (and should not be) the RDS
+# instance's own security group.
 
 [default.deploy.parameters]
 stack_name = "apohco-dashboard"
