@@ -98,8 +98,10 @@ function rowsFromBuffer(buffer, fileExtension) {
 // Required columns: TransactionDate, Classification, and either
 // (AccountCode + AccountName) or a single "Account" column formatted as
 // "<code> <name>" (auto-split — see resolveAccountCodeAndName).
-// Optional: Debit, Credit, Amount (computed from Debit-Credit if omitted),
-// TransactionType, Description, ClassName.
+// At least one of Debit, Credit, or Amount must be provided (Amount is
+// computed from Debit-Credit if it's the one omitted) — a row with all
+// three blank is a validation error, not a silent $0 transaction.
+// Optional: TransactionType, Description, ClassName.
 function parseTransactionFile(buffer, fileExtension) {
   const rawRows = rowsFromBuffer(buffer, fileExtension);
 
@@ -114,13 +116,20 @@ function parseTransactionFile(buffer, fileExtension) {
     const classification = String(getField(raw, 'Classification') ?? '').trim();
     const className = String(getField(raw, 'ClassName') ?? '').trim() || null;
 
-    const debit = parseNumber(getField(raw, 'Debit'));
-    const credit = parseNumber(getField(raw, 'Credit'));
+    const debitField = getField(raw, 'Debit');
+    const creditField = getField(raw, 'Credit');
     const amountField = getField(raw, 'Amount');
-    const amount = amountField !== undefined && amountField !== '' ? parseNumber(amountField) : debit - credit;
+    const isBlank = (v) => v === undefined || v === null || String(v).trim() === '';
+
+    const debit = parseNumber(debitField);
+    const credit = parseNumber(creditField);
+    const amount = !isBlank(amountField) ? parseNumber(amountField) : debit - credit;
 
     const rowErrors = [];
     if (!transactionDate) rowErrors.push('invalid or missing TransactionDate');
+    if (isBlank(debitField) && isBlank(creditField) && isBlank(amountField)) {
+      rowErrors.push('must provide Debit and/or Credit, or Amount');
+    }
     if (!accountCode) {
       rowErrors.push(
         accountName
