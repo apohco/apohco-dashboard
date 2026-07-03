@@ -14,7 +14,13 @@ import {
   Button,
   Alert,
   Divider,
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogActions,
+  DialogContentText,
 } from '@mui/material';
+import ContentCopyIcon from '@mui/icons-material/ContentCopy';
 import { useAuth } from '../../context/AuthContext';
 import {
   listQBOs,
@@ -28,6 +34,89 @@ const CREATE_NEW = '__create_new__';
 
 const PL_CLASSIFICATIONS = new Set(['Revenue', 'Expense']);
 
+function CopyGroupingsDialog({ open, onClose, groupId, currentQboId, qbos, accounts, onApply }) {
+  const [sourceQboId, setSourceQboId] = useState('');
+  const [copying, setCopying] = useState(false);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    if (open) {
+      setSourceQboId('');
+      setError(null);
+    }
+  }, [open]);
+
+  const otherQbos = qbos.filter((q) => q.qboid !== currentQboId);
+
+  const handleCopy = async () => {
+    setCopying(true);
+    setError(null);
+    try {
+      const sourceAccounts = await listChartOfAccounts(groupId, sourceQboId);
+      const sourceByCode = new Map(
+        sourceAccounts.filter((a) => a.accountcode).map((a) => [a.accountcode, a.groupingid])
+      );
+
+      const updates = {};
+      let matched = 0;
+      for (const account of accounts) {
+        if (account.accountcode && sourceByCode.has(account.accountcode)) {
+          updates[account.mappingid] = sourceByCode.get(account.accountcode) || null;
+          matched += 1;
+        }
+      }
+
+      onApply(updates, matched, accounts.length);
+      onClose();
+    } catch (err) {
+      setError(err);
+    } finally {
+      setCopying(false);
+    }
+  };
+
+  return (
+    <Dialog open={open} onClose={onClose} maxWidth="sm" fullWidth>
+      <DialogTitle>Copy Groupings from another QBO</DialogTitle>
+      <DialogContent>
+        {error && (
+          <Alert severity="error" sx={{ mb: 2 }}>
+            {error.response?.data?.message || error.message}
+          </Alert>
+        )}
+        <DialogContentText sx={{ mb: 2 }}>
+          This overwrites the Grouping selection shown below for any account whose Account Code
+          matches one in the source QBO. Account Name and Type are not affected, and accounts with
+          no matching code in the source are left as-is. Nothing is saved to the database until you
+          click Save on the main page — you can review or undo before then.
+        </DialogContentText>
+        <Select
+          fullWidth
+          size="small"
+          displayEmpty
+          value={sourceQboId}
+          onChange={(e) => setSourceQboId(e.target.value)}
+        >
+          <MenuItem value="" disabled>
+            Copy Groupings from...
+          </MenuItem>
+          {otherQbos.map((q) => (
+            <MenuItem key={q.qboid} value={q.qboid}>
+              {q.qboname}
+            </MenuItem>
+          ))}
+        </Select>
+      </DialogContent>
+      <DialogActions>
+        <Button onClick={onClose}>Cancel</Button>
+        <Button variant="contained" disabled={!sourceQboId || copying} onClick={handleCopy}>
+          {copying ? 'Copying...' : 'Copy Groupings'}
+        </Button>
+      </DialogActions>
+    </Dialog>
+  );
+}
+
 export default function ChartOfAccountsSetup() {
   const { groupId } = useAuth();
   const [qbos, setQbos] = useState([]);
@@ -38,6 +127,7 @@ export default function ChartOfAccountsSetup() {
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState(null);
   const [error, setError] = useState(null);
+  const [copyDialogOpen, setCopyDialogOpen] = useState(false);
 
   useEffect(() => {
     if (!groupId) return;
@@ -78,6 +168,11 @@ export default function ChartOfAccountsSetup() {
     setPendingGroupingByMapping((prev) => ({ ...prev, [row.mappingid]: value || null }));
   };
 
+  const handleCopyApplied = (updates, matched, total) => {
+    setPendingGroupingByMapping((prev) => ({ ...prev, ...updates }));
+    setMessage(`Copied groupings for ${matched} of ${total} account(s). Review below, then Save.`);
+  };
+
   const dirtyCount = Object.keys(pendingGroupingByMapping).length;
 
   const handleSave = async () => {
@@ -110,22 +205,35 @@ export default function ChartOfAccountsSetup() {
         Chart of Accounts
       </Typography>
 
-      <Select
-        size="small"
-        displayEmpty
-        value={qboId}
-        onChange={(e) => setQboId(e.target.value)}
-        sx={{ mb: 2, minWidth: 280 }}
-      >
-        <MenuItem value="" disabled>
-          Select a QBO
-        </MenuItem>
-        {qbos.map((q) => (
-          <MenuItem key={q.qboid} value={q.qboid}>
-            {q.qboname}
+      <Box sx={{ display: 'flex', gap: 2, alignItems: 'center', mb: 2 }}>
+        <Select
+          size="small"
+          displayEmpty
+          value={qboId}
+          onChange={(e) => setQboId(e.target.value)}
+          sx={{ minWidth: 280 }}
+        >
+          <MenuItem value="" disabled>
+            Select a QBO
           </MenuItem>
-        ))}
-      </Select>
+          {qbos.map((q) => (
+            <MenuItem key={q.qboid} value={q.qboid}>
+              {q.qboname}
+            </MenuItem>
+          ))}
+        </Select>
+
+        {qboId && qbos.length > 1 && (
+          <Button
+            size="small"
+            variant="outlined"
+            startIcon={<ContentCopyIcon />}
+            onClick={() => setCopyDialogOpen(true)}
+          >
+            Copy Groupings from another QBO
+          </Button>
+        )}
+      </Box>
 
       {message && <Alert severity="success" sx={{ mb: 2 }}>{message}</Alert>}
       {error && <Alert severity="error" sx={{ mb: 2 }}>{error.response?.data?.message || error.message}</Alert>}
@@ -189,6 +297,16 @@ export default function ChartOfAccountsSetup() {
           >
             {saving ? 'Saving...' : `Save${dirtyCount ? ` (${dirtyCount} changed)` : ''}`}
           </Button>
+
+          <CopyGroupingsDialog
+            open={copyDialogOpen}
+            onClose={() => setCopyDialogOpen(false)}
+            groupId={groupId}
+            currentQboId={qboId}
+            qbos={qbos}
+            accounts={accounts}
+            onApply={handleCopyApplied}
+          />
         </>
       )}
     </Box>
