@@ -35,12 +35,25 @@ function parseNumber(value) {
   return Number.isFinite(n) ? n : NaN;
 }
 
-// Case-insensitive lookup of a row's value by column name, tolerating
-// extra whitespace in the header (e.g. a trailing space from an Excel
-// export).
+const normalizeHeader = (s) => s.replace(/\s+/g, '').toLowerCase();
+
+// Case-insensitive, whitespace-insensitive lookup of a row's value by
+// column name — QBO's own report exports use headers like "Transaction
+// date" and "Distribution account" (spaced, sentence case), not our exact
+// "TransactionDate", so comparing on trimmed-but-otherwise-literal strings
+// silently failed to find the column at all (every row then fails
+// validation as "missing TransactionDate", which is what actually
+// happened rather than any file-size issue). `name` may be a single
+// header or an array of accepted aliases, checked in order.
 function getField(row, name) {
-  const key = Object.keys(row).find((k) => k.trim().toLowerCase() === name.toLowerCase());
-  return key ? row[key] : undefined;
+  const names = Array.isArray(name) ? name : [name];
+  const keys = Object.keys(row);
+  for (const candidate of names) {
+    const target = normalizeHeader(candidate);
+    const key = keys.find((k) => normalizeHeader(k) === target);
+    if (key) return row[key];
+  }
+  return undefined;
 }
 
 // QBO's General Ledger export shows each account as a single label —
@@ -61,12 +74,56 @@ function resolveAccountCodeAndName(raw) {
     return { accountCode: explicitCode, accountName: explicitName };
   }
 
-  const combined = String(getField(raw, 'Account') ?? '').trim();
+  const combined = String(getField(raw, ['Account', 'Distribution account']) ?? '').trim();
   const match = /^(\d[\d.-]*)\s+(.+)$/.exec(combined);
   if (match) {
     return { accountCode: match[1], accountName: match[2] };
   }
   return { accountCode: '', accountName: combined };
+}
+
+// Column names we know how to use, for detecting which row is the real
+// header row (see findHeaderRowIndex below).
+const KNOWN_HEADERS = [
+  'transactiondate', 'account', 'distributionaccount', 'accountcode', 'accountname',
+  'debit', 'credit', 'amount', 'classification', 'transactiontype', 'description',
+  'classname', 'qbotransactionid',
+];
+
+// QBO's own report exports (e.g. "General Ledger") put a multi-row title
+// block above the real header — company name, report name, date range,
+// a blank line — before the row that actually says "Transaction date,
+// Distribution account, ...". Blindly treating row 1 as the header (as
+// csv-parse's columns:true / sheet_to_json do by default) reads the
+// company name as a column name and produces zero usable columns, so
+// every row fails validation. Scan the first few rows instead and use
+// the first one that looks like a real header (matches at least 2 known
+// column names) — falls back to row 1 if nothing recognized, so a
+// file that already starts with our own headers is unaffected.
+function findHeaderRowIndex(rowsOfArrays, maxScan = 15) {
+  for (let i = 0; i < Math.min(rowsOfArrays.length, maxScan); i++) {
+    const matches = rowsOfArrays[i].filter((cell) =>
+      KNOWN_HEADERS.includes(normalizeHeader(String(cell ?? '')))
+    ).length;
+    if (matches >= 2) return i;
+  }
+  return 0;
+}
+
+function rowsFromArrays(rowsOfArrays) {
+  const headerIdx = findHeaderRowIndex(rowsOfArrays);
+  const headers = (rowsOfArrays[headerIdx] || []).map((h) => String(h ?? '').trim());
+  return rowsOfArrays
+    .map((arr, i) => ({ arr, sourceRow: i + 1 })) // 1-indexed, matches the row the user would count in a spreadsheet
+    .slice(headerIdx + 1)
+    .filter(({ arr }) => arr.some((cell) => String(cell ?? '').trim() !== ''))
+    .map(({ arr, sourceRow }) => {
+      const obj = { __sourceRow: sourceRow };
+      headers.forEach((h, i) => {
+        if (h) obj[h] = arr[i] ?? '';
+      });
+      return obj;
+    });
 }
 
 // CSV is parsed with csv-parse rather than xlsx: xlsx's CSV ingestion path
@@ -79,17 +136,19 @@ function resolveAccountCodeAndName(raw) {
 // stored explicitly in the file), so those still go through xlsx.
 function rowsFromBuffer(buffer, fileExtension) {
   if (fileExtension === 'csv') {
-    return parseCsv(buffer, {
-      columns: true,
+    const rowsOfArrays = parseCsv(buffer, {
+      columns: false,
       skip_empty_lines: true,
       trim: true,
       bom: true,
       relax_column_count: true, // tolerate ragged rows (e.g. a stray trailing comma) rather than failing the whole file
     });
+    return rowsFromArrays(rowsOfArrays);
   }
   const workbook = XLSX.read(buffer, { type: 'buffer' });
   const sheet = workbook.Sheets[workbook.SheetNames[0]];
-  return XLSX.utils.sheet_to_json(sheet, { raw: false, defval: '' });
+  const rowsOfArrays = XLSX.utils.sheet_to_json(sheet, { header: 1, raw: false, defval: '' });
+  return rowsFromArrays(rowsOfArrays);
 }
 
 // Parses an uploaded CSV/XLSX buffer into RawTransactions-shaped rows,
@@ -109,8 +168,8 @@ function parseTransactionFile(buffer, fileExtension) {
   const errors = [];
   const accountsByCode = new Map();
 
-  rawRows.forEach((raw, i) => {
-    const rowNum = i + 2; // +1 for header row, +1 for 1-indexing
+  rawRows.forEach((raw) => {
+    const rowNum = raw.__sourceRow;
     const transactionDate = parseDate(getField(raw, 'TransactionDate'));
     const { accountCode, accountName } = resolveAccountCodeAndName(raw);
     const classification = String(getField(raw, 'Classification') ?? '').trim();
