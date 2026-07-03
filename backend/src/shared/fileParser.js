@@ -43,6 +43,32 @@ function getField(row, name) {
   return key ? row[key] : undefined;
 }
 
+// QBO's General Ledger export shows each account as a single label —
+// "<AcctNum> <Name>", e.g. "400001 Management Fee Income" — rather than
+// separate code/name columns, so requiring the uploader to manually split
+// that into two columns is unnecessary busywork. If the file has a single
+// "Account" column instead of separate AccountCode/AccountName columns,
+// split it automatically — but only when the leading token actually looks
+// like a QBO account number (starts with a digit). Unlike the naive
+// "split on first space" approach we had to fix for the API sync, this
+// won't misfire on a company without account numbering (e.g. "Accounts
+// Payable (A/P)") — it just leaves AccountCode blank, which surfaces as a
+// normal per-row validation error instead of a silently wrong split.
+function resolveAccountCodeAndName(raw) {
+  const explicitCode = String(getField(raw, 'AccountCode') ?? '').trim();
+  const explicitName = String(getField(raw, 'AccountName') ?? '').trim();
+  if (explicitCode || explicitName) {
+    return { accountCode: explicitCode, accountName: explicitName };
+  }
+
+  const combined = String(getField(raw, 'Account') ?? '').trim();
+  const match = /^(\d[\d.-]*)\s+(.+)$/.exec(combined);
+  if (match) {
+    return { accountCode: match[1], accountName: match[2] };
+  }
+  return { accountCode: '', accountName: combined };
+}
+
 // CSV is parsed with csv-parse rather than xlsx: xlsx's CSV ingestion path
 // runs the same type-inference it uses for real spreadsheet cells, and
 // will silently "helpfully" reinterpret date-shaped text like "2026-01-13"
@@ -69,7 +95,9 @@ function rowsFromBuffer(buffer, fileExtension) {
 // Parses an uploaded CSV/XLSX buffer into RawTransactions-shaped rows,
 // plus the distinct set of accounts referenced (for upserting
 // ChartOfAccountsMappings) and any per-row validation errors.
-// Required columns: TransactionDate, AccountCode, AccountName, Classification.
+// Required columns: TransactionDate, Classification, and either
+// (AccountCode + AccountName) or a single "Account" column formatted as
+// "<code> <name>" (auto-split — see resolveAccountCodeAndName).
 // Optional: Debit, Credit, Amount (computed from Debit-Credit if omitted),
 // TransactionType, Description, ClassName.
 function parseTransactionFile(buffer, fileExtension) {
@@ -82,8 +110,7 @@ function parseTransactionFile(buffer, fileExtension) {
   rawRows.forEach((raw, i) => {
     const rowNum = i + 2; // +1 for header row, +1 for 1-indexing
     const transactionDate = parseDate(getField(raw, 'TransactionDate'));
-    const accountCode = String(getField(raw, 'AccountCode') ?? '').trim();
-    const accountName = String(getField(raw, 'AccountName') ?? '').trim();
+    const { accountCode, accountName } = resolveAccountCodeAndName(raw);
     const classification = String(getField(raw, 'Classification') ?? '').trim();
     const className = String(getField(raw, 'ClassName') ?? '').trim() || null;
 
@@ -94,7 +121,13 @@ function parseTransactionFile(buffer, fileExtension) {
 
     const rowErrors = [];
     if (!transactionDate) rowErrors.push('invalid or missing TransactionDate');
-    if (!accountCode) rowErrors.push('missing AccountCode');
+    if (!accountCode) {
+      rowErrors.push(
+        accountName
+          ? `couldn't find an account number at the start of "${accountName}" — add a separate AccountCode column, or fix the Account value`
+          : 'missing AccountCode'
+      );
+    }
     if (!accountName) rowErrors.push('missing AccountName');
     if (!VALID_CLASSIFICATIONS.includes(classification)) {
       rowErrors.push(`Classification must be one of ${VALID_CLASSIFICATIONS.join(', ')}`);
