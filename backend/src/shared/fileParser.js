@@ -3,9 +3,22 @@ const { parse: parseCsv } = require('csv-parse/sync');
 
 const VALID_CLASSIFICATIONS = ['Asset', 'Liability', 'Equity', 'Revenue', 'Expense'];
 
-// Accepts "YYYY-MM-DD" (optionally with a time suffix), "M/D/YYYY", or an
-// Excel/Date object (xlsx returns these for some cell formats even with
-// raw:false). Returns a "YYYY-MM-DD" string or null if unparseable.
+// Excel/Lotus store dates internally as a plain integer count of days
+// since Dec 30, 1899 (the "1900 leap year bug" epoch every spreadsheet
+// program uses for compatibility). If a cell's number format gets reset
+// to General/Number — easy to trigger by touching the column in Excel —
+// re-saving as CSV writes that raw serial ("44927") instead of a date
+// string. 25569 covers 1970-01-01 through roughly 2100, comfortably
+// bounding any real transaction date without misreading an unrelated
+// small integer as a date serial.
+function excelSerialToDate(serial) {
+  return new Date(Date.UTC(1899, 11, 30) + Math.round(serial) * 86400000);
+}
+
+// Accepts "YYYY-MM-DD" (optionally with a time suffix), "M/D/YYYY", a bare
+// Excel date serial number (see excelSerialToDate), or an Excel/Date
+// object (xlsx returns these for some cell formats even with raw:false).
+// Returns a "YYYY-MM-DD" string or null if unparseable.
 function parseDate(value) {
   if (value instanceof Date && !Number.isNaN(value.getTime())) {
     const y = value.getUTCFullYear();
@@ -24,6 +37,12 @@ function parseDate(value) {
   if (us) {
     const [, m, d, y] = us;
     return `${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`;
+  }
+
+  const serial = /^(\d{4,6})(\.\d+)?$/.exec(str);
+  if (serial) {
+    const n = Number(str);
+    if (n >= 20000 && n <= 60000) return parseDate(excelSerialToDate(n));
   }
 
   return null;
