@@ -157,11 +157,16 @@ function rowsFromBuffer(buffer, fileExtension) {
 // Required columns: TransactionDate, Classification, and either
 // (AccountCode + AccountName) or a single "Account" column formatted as
 // "<code> <name>" (auto-split — see resolveAccountCodeAndName).
+// Classification is only required the first time an AccountCode is seen —
+// `knownClassifications` (AccountCode -> Classification, from this QBO's
+// already-reconciled Chart of Accounts) fills in blanks for accounts we've
+// already classified on a prior upload or API sync, since Classification
+// is a property of the account, not of any one transaction.
 // At least one of Debit, Credit, or Amount must be provided (Amount is
 // computed from Debit-Credit if it's the one omitted) — a row with all
 // three blank is a validation error, not a silent $0 transaction.
 // Optional: TransactionType, Description, ClassName.
-function parseTransactionFile(buffer, fileExtension) {
+function parseTransactionFile(buffer, fileExtension, knownClassifications = {}) {
   const rawRows = rowsFromBuffer(buffer, fileExtension);
 
   const rows = [];
@@ -172,7 +177,8 @@ function parseTransactionFile(buffer, fileExtension) {
     const rowNum = raw.__sourceRow;
     const transactionDate = parseDate(getField(raw, 'TransactionDate'));
     const { accountCode, accountName } = resolveAccountCodeAndName(raw);
-    const classification = String(getField(raw, 'Classification') ?? '').trim();
+    const explicitClassification = String(getField(raw, 'Classification') ?? '').trim();
+    const classification = explicitClassification || knownClassifications[accountCode] || '';
     const className = String(getField(raw, 'ClassName') ?? '').trim() || null;
 
     const debitField = getField(raw, 'Debit');
@@ -198,7 +204,10 @@ function parseTransactionFile(buffer, fileExtension) {
     }
     if (!accountName) rowErrors.push('missing AccountName');
     if (!VALID_CLASSIFICATIONS.includes(classification)) {
-      rowErrors.push(`Classification must be one of ${VALID_CLASSIFICATIONS.join(', ')}`);
+      rowErrors.push(
+        `Classification must be one of ${VALID_CLASSIFICATIONS.join(', ')} (only required the ` +
+          `first time account ${accountCode || '?'} appears — after that it's remembered)`
+      );
     }
     if (Number.isNaN(debit) || Number.isNaN(credit) || Number.isNaN(amount)) {
       rowErrors.push('Debit/Credit/Amount must be numeric');

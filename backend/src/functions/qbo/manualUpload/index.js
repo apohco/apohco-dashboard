@@ -73,6 +73,18 @@ function fileExtension(fileName) {
   return match ? match[1].toLowerCase() : '';
 }
 
+// AccountCode -> Classification for accounts this QBO has already been
+// reconciled against (via a prior manual upload or API sync). Lets the
+// parser accept a blank Classification for accounts it already knows,
+// since Classification belongs to the account, not to any one upload.
+async function loadKnownClassifications(qboId) {
+  const { rows } = await query(
+    `SELECT AccountCode, Classification FROM ChartOfAccountsMappings WHERE QBOId = $1`,
+    [qboId]
+  );
+  return Object.fromEntries(rows.map((r) => [r.accountcode, r.classification]));
+}
+
 async function handlePresign(body, claims) {
   const { qboId, fileName } = body;
   if (!qboId || !fileName) {
@@ -102,10 +114,15 @@ async function handlePreview(body, claims) {
     err.statusCode = 400;
     throw err;
   }
-  await loadQbo(qboId, claims);
+  const qbo = await loadQbo(qboId, claims);
 
   const buffer = await getObjectBuffer(s3Key);
-  const { rows, errors, accounts, totalRows } = parseTransactionFile(buffer, fileExtension(s3Key));
+  const knownClassifications = await loadKnownClassifications(qbo.qboid);
+  const { rows, errors, accounts, totalRows } = parseTransactionFile(
+    buffer,
+    fileExtension(s3Key),
+    knownClassifications
+  );
 
   return json(200, {
     totalRows,
@@ -127,7 +144,12 @@ async function handleConfirm(body, claims) {
   const qbo = await loadQbo(qboId, claims);
 
   const buffer = await getObjectBuffer(s3Key);
-  const { rows, errors, accounts } = parseTransactionFile(buffer, fileExtension(s3Key));
+  const knownClassifications = await loadKnownClassifications(qbo.qboid);
+  const { rows, errors, accounts } = parseTransactionFile(
+    buffer,
+    fileExtension(s3Key),
+    knownClassifications
+  );
 
   let classNameToId = new Map();
   if (qbo.isclassbased) {
