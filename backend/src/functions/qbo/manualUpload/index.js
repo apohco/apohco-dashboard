@@ -51,19 +51,47 @@ async function resolveClasses(qboId, classNames) {
   return nameToId;
 }
 
+function chunk(array, size) {
+  const chunks = [];
+  for (let i = 0; i < array.length; i += size) chunks.push(array.slice(i, i + size));
+  return chunks;
+}
+
+// Builds a single multi-row "INSERT ... VALUES ($1,$2,...),($n+1,...)..."
+// statement (and its flattened parameter list) for a batch of rows, each
+// given as an array of column values in the same order as `columns`.
+function buildBatchInsert(table, columns, valueRows) {
+  const params = [];
+  const valueGroups = valueRows.map((row) => {
+    const placeholders = row.map((value) => {
+      params.push(value);
+      return `$${params.length}`;
+    });
+    return `(${placeholders.join(', ')})`;
+  });
+  const sql = `INSERT INTO ${table} (${columns.join(', ')}) VALUES ${valueGroups.join(', ')}`;
+  return { sql, params };
+}
+
 // Upserts ChartOfAccountsMappings for every account referenced in the
 // upload, preserving existing GroupingId assignments — same "reconcile"
-// behavior as syncQBOData's API sync path.
+// behavior as syncQBOData's API sync path. Batched (rather than one
+// INSERT per account) since a large chart of accounts would otherwise
+// mean hundreds of sequential round-trips to the database.
 async function upsertAccounts(groupId, qboId, accounts) {
-  for (const account of accounts) {
+  for (const batch of chunk(accounts, 500)) {
+    const { sql, params } = buildBatchInsert(
+      'ChartOfAccountsMappings',
+      ['GroupId', 'QBOId', 'AccountCode', 'AccountName', 'Classification'],
+      batch.map((a) => [groupId, qboId, a.accountCode, a.accountName, a.classification])
+    );
     await query(
-      `INSERT INTO ChartOfAccountsMappings (GroupId, QBOId, AccountCode, AccountName, Classification)
-       VALUES ($1, $2, $3, $4, $5)
+      `${sql}
        ON CONFLICT (QBOId, AccountCode) DO UPDATE SET
          AccountName = EXCLUDED.AccountName,
          Classification = EXCLUDED.Classification,
          LastUpdated = now()`,
-      [groupId, qboId, account.accountCode, account.accountName, account.classification]
+      params
     );
   }
 }
@@ -159,23 +187,29 @@ async function handleConfirm(body, claims) {
 
   await upsertAccounts(qbo.groupid, qbo.qboid, accounts);
 
+  // Batched in groups of 500 rather than one INSERT per row -- a single
+  // large upload (thousands of rows) doing one round-trip per row was the
+  // actual cause of "Network Error" on Confirm: API Gateway has a hard
+  // 29-second integration timeout that isn't configurable higher, no
+  // matter what the Lambda's own timeout is set to, and thousands of
+  // sequential inserts routinely blew past that.
   await withTransaction(async (client) => {
     await client.query(
       `DELETE FROM RawTransactions WHERE QBOId = $1 AND TransactionDate BETWEEN $2 AND $3`,
       [qbo.qboid, startDate, endDate]
     );
 
-    for (const row of rows) {
-      const qboClassId = row.className ? classNameToId.get(row.className) || null : null;
-      await client.query(
-        `INSERT INTO RawTransactions
-           (GroupId, QBOId, QBOClassId, TransactionDate, AccountCode, AccountName,
-            Debit, Credit, Amount, TransactionType, Description, QBOTransactionId)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+    for (const batch of chunk(rows, 500)) {
+      const { sql, params } = buildBatchInsert(
+        'RawTransactions',
         [
+          'GroupId', 'QBOId', 'QBOClassId', 'TransactionDate', 'AccountCode', 'AccountName',
+          'Debit', 'Credit', 'Amount', 'TransactionType', 'Description', 'QBOTransactionId',
+        ],
+        batch.map((row) => [
           qbo.groupid,
           qbo.qboid,
-          qboClassId,
+          row.className ? classNameToId.get(row.className) || null : null,
           row.transactionDate,
           row.accountCode,
           row.accountName,
@@ -185,8 +219,9 @@ async function handleConfirm(body, claims) {
           row.transactionType,
           row.description,
           row.qboTransactionId,
-        ]
+        ])
       );
+      await client.query(sql, params);
     }
   });
 
