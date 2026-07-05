@@ -6,7 +6,12 @@ import ReportTable from '../../components/reports/ReportTable';
 import EmptyState from '../../components/EmptyState';
 import { useAuth } from '../../context/AuthContext';
 import useEntityOptions, { parseEntityValue } from '../../hooks/useEntityOptions';
-import { buildRangePeriods } from '../../utils/periods';
+import {
+  buildRangePeriods,
+  buildTtmPeriod,
+  buildCompareTtmPeriods,
+  buildCustomRangePeriods,
+} from '../../utils/periods';
 import { getProfitAndLoss } from '../../api/reports';
 
 export default function ProfitAndLossReport() {
@@ -14,16 +19,25 @@ export default function ProfitAndLossReport() {
   const { options: entityOptions } = useEntityOptions(groupId);
 
   const [viewMode, setViewMode] = useState('single');
+  const [periodType, setPeriodType] = useState('month'); // 'month' | 'ttm' -- applies to Single Month and Compare
   const [entity, setEntity] = useState('');
   const [detailLevel, setDetailLevel] = useState('summary');
   const [showPercentOfRevenue, setShowPercentOfRevenue] = useState(false);
   const [selectedMonth, setSelectedMonth] = useState(dayjs().format('YYYY-MM'));
+  const [fromMonth, setFromMonth] = useState(dayjs().startOf('year').format('YYYY-MM'));
+  const [toMonth, setToMonth] = useState(dayjs().format('YYYY-MM'));
 
   const [report, setReport] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
 
-  const periods = useMemo(() => buildRangePeriods(viewMode, selectedMonth), [viewMode, selectedMonth]);
+  const periods = useMemo(() => {
+    if (viewMode === 'multi') return buildCustomRangePeriods(fromMonth, toMonth);
+    if (periodType === 'ttm') {
+      return viewMode === 'compare' ? buildCompareTtmPeriods(selectedMonth) : buildTtmPeriod(selectedMonth);
+    }
+    return buildRangePeriods(viewMode, selectedMonth);
+  }, [viewMode, periodType, selectedMonth, fromMonth, toMonth]);
 
   useEffect(() => {
     if (!groupId || !entity) return;
@@ -52,14 +66,47 @@ export default function ProfitAndLossReport() {
         lastSynced={report?.lastSyncedAt ? dayjs(report.lastSyncedAt).format('MMM D, YYYY h:mm A') : null}
         extraControls={
           <>
-            <TextField
-              size="small"
-              type="month"
-              label="Month"
-              InputLabelProps={{ shrink: true }}
-              value={selectedMonth}
-              onChange={(e) => setSelectedMonth(e.target.value)}
-            />
+            {viewMode !== 'multi' && (
+              <ToggleButtonGroup
+                size="small"
+                exclusive
+                value={periodType}
+                onChange={(e, v) => v && setPeriodType(v)}
+              >
+                <ToggleButton value="month">Month</ToggleButton>
+                <ToggleButton value="ttm">Annual TTM</ToggleButton>
+              </ToggleButtonGroup>
+            )}
+            {viewMode !== 'multi' && (
+              <TextField
+                size="small"
+                type="month"
+                label={periodType === 'ttm' ? 'TTM Ending' : 'Month'}
+                InputLabelProps={{ shrink: true }}
+                value={selectedMonth}
+                onChange={(e) => setSelectedMonth(e.target.value)}
+              />
+            )}
+            {viewMode === 'multi' && (
+              <>
+                <TextField
+                  size="small"
+                  type="month"
+                  label="From"
+                  InputLabelProps={{ shrink: true }}
+                  value={fromMonth}
+                  onChange={(e) => setFromMonth(e.target.value)}
+                />
+                <TextField
+                  size="small"
+                  type="month"
+                  label="To"
+                  InputLabelProps={{ shrink: true }}
+                  value={toMonth}
+                  onChange={(e) => setToMonth(e.target.value)}
+                />
+              </>
+            )}
             <ToggleButtonGroup
               size="small"
               exclusive

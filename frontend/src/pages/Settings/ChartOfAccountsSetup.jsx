@@ -147,7 +147,9 @@ export default function ChartOfAccountsSetup() {
 
   const groupingOptionsFor = (classification) => {
     const accountType = PL_CLASSIFICATIONS.has(classification) ? 'PL' : 'BalanceSheet';
-    return groupings.filter((g) => g.accounttype === accountType);
+    return groupings
+      .filter((g) => g.accounttype === accountType)
+      .sort((a, b) => a.groupingname.localeCompare(b.groupingname));
   };
 
   const currentGroupingId = (row) =>
