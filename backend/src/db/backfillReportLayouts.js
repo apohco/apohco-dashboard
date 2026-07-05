@@ -242,6 +242,29 @@ async function seedCashFlow(client, groupId) {
   }
 }
 
+// Exported separately from the CLI entrypoint below so it can be reused by
+// anything that already has a connected `client` (e.g. a one-off Lambda
+// running inside the VPC with credentials from Secrets Manager, rather than
+// raw DB_USER/DB_PASSWORD env vars).
+async function backfillAll(client) {
+  const log = [];
+  const { rows: groups } = await client.query(`SELECT GroupId, GroupName FROM Groups`);
+  for (const group of groups) {
+    await client.query('BEGIN');
+    try {
+      await seedPL(client, group.groupid);
+      await seedBalanceSheet(client, group.groupid);
+      await seedCashFlow(client, group.groupid);
+      await client.query('COMMIT');
+      log.push(`Seeded Report Layouts for Group ${group.groupname} (${group.groupid})`);
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw new Error(`Backfill failed for Group ${group.groupid}: ${err.message}`);
+    }
+  }
+  return log;
+}
+
 async function run() {
   const client = new Client({
     host: process.env.DB_HOST,
@@ -254,27 +277,19 @@ async function run() {
 
   await client.connect();
   try {
-    const { rows: groups } = await client.query(`SELECT GroupId, GroupName FROM Groups`);
-    for (const group of groups) {
-      console.log(`Seeding Report Layouts for Group ${group.groupname} (${group.groupid})`);
-      await client.query('BEGIN');
-      try {
-        await seedPL(client, group.groupid);
-        await seedBalanceSheet(client, group.groupid);
-        await seedCashFlow(client, group.groupid);
-        await client.query('COMMIT');
-      } catch (err) {
-        await client.query('ROLLBACK');
-        throw new Error(`Backfill failed for Group ${group.groupid}: ${err.message}`);
-      }
-    }
+    const log = await backfillAll(client);
+    log.forEach((line) => console.log(line));
     console.log('Backfill complete.');
   } finally {
     await client.end();
   }
 }
 
-run().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+module.exports = { backfillAll };
+
+if (require.main === module) {
+  run().catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });
+}
