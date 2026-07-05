@@ -6,7 +6,6 @@ import {
   TableCell,
   TableContainer,
   Paper,
-  Box,
   Typography,
 } from '@mui/material';
 import { formatCurrency, formatPercent } from '../../utils/format';
@@ -24,17 +23,29 @@ function AmountCell({ amount, showPercentOfRevenue, revenueForPeriod, bold }) {
   );
 }
 
-function GroupingRows({ grouping, periods, detailLevel, showPercentOfRevenue, revenueByPeriod }) {
-  if (detailLevel !== 'detail') {
+// A row's rendering only depends on its rowType: Grouping rows look like a
+// normal line item (with an optional expanded account breakdown in Detail
+// view); Total rows get a bold top border (today's old section-total
+// style); Net rows get a bold grey band (today's old summary-row style) so
+// things like "Net Income" still stand out at a glance.
+function ReportRow({ row, periods, detailLevel, showPercentOfRevenue, revenueByPeriod }) {
+  const isEmphasized = row.rowType === 'Total' || row.rowType === 'Net';
+  const rowSx = row.rowType === 'Net' ? { bgcolor: 'grey.100' } : {};
+  const cellSx = row.rowType === 'Total' ? { borderTop: '2px solid #E3E5E8' } : {};
+
+  if (row.rowType !== 'Grouping' || detailLevel !== 'detail') {
     return (
-      <TableRow>
-        <TableCell sx={{ pl: 2 }}>{grouping.groupingName}</TableCell>
+      <TableRow sx={rowSx}>
+        <TableCell sx={{ pl: row.rowType === 'Grouping' ? 2 : 0, fontWeight: isEmphasized ? 700 : 400, ...cellSx }}>
+          {row.label}
+        </TableCell>
         {periods.map((p) => (
           <AmountCell
             key={p.label}
-            amount={grouping.subtotalsByPeriod[p.label]}
+            amount={row.valuesByPeriod[p.label]}
             showPercentOfRevenue={showPercentOfRevenue}
             revenueForPeriod={revenueByPeriod?.[p.label]}
+            bold={isEmphasized}
           />
         ))}
       </TableRow>
@@ -45,10 +56,10 @@ function GroupingRows({ grouping, periods, detailLevel, showPercentOfRevenue, re
     <>
       <TableRow>
         <TableCell colSpan={periods.length + 1} sx={{ pl: 2, fontWeight: 600, bgcolor: 'grey.50' }}>
-          {grouping.groupingName}
+          {row.label}
         </TableCell>
       </TableRow>
-      {(grouping.accounts || []).map((account) => (
+      {(row.accounts || []).map((account) => (
         <TableRow key={account.accountCode || account.accountName}>
           <TableCell sx={{ pl: 5 }}>{account.accountName}</TableCell>
           {periods.map((p) => (
@@ -62,11 +73,11 @@ function GroupingRows({ grouping, periods, detailLevel, showPercentOfRevenue, re
         </TableRow>
       ))}
       <TableRow>
-        <TableCell sx={{ pl: 3, fontWeight: 600 }}>Total for {grouping.groupingName}</TableCell>
+        <TableCell sx={{ pl: 3, fontWeight: 600 }}>Total for {row.label}</TableCell>
         {periods.map((p) => (
           <AmountCell
             key={p.label}
-            amount={grouping.subtotalsByPeriod[p.label]}
+            amount={row.valuesByPeriod[p.label]}
             showPercentOfRevenue={showPercentOfRevenue}
             revenueForPeriod={revenueByPeriod?.[p.label]}
             bold
@@ -77,13 +88,13 @@ function GroupingRows({ grouping, periods, detailLevel, showPercentOfRevenue, re
   );
 }
 
-// Generic renderer for report sections shaped like
-// { groupings: [{groupingId, groupingName, subtotalsByPeriod, accounts?}], totalsByPeriod }
-// as returned by the P&L / Balance Sheet / Cash Flow report Lambdas.
+// Renders a Report Layout's flat, ordered row list -- Grouping, Total, and
+// Net rows interleaved exactly as configured in Settings > Report Layout
+// (see reportHelpers.evaluateReportLayout on the backend), rather than the
+// old fixed Income/Expenses-style sections.
 export default function ReportTable({
   periods,
-  sections, // [{ title, section }]
-  summaryRows = [], // [{ label, valuesByPeriod, emphasize? }]
+  rows, // [{rowId, rowType: 'Grouping'|'Total'|'Net', label, valuesByPeriod, accounts?}]
   detailLevel = 'summary',
   showPercentOfRevenue = false,
   revenueByPeriod,
@@ -102,49 +113,15 @@ export default function ReportTable({
           </TableRow>
         </TableHead>
         <TableBody>
-          {sections.map(({ title, section }) => (
-            <Box key={title} component="tbody" sx={{ display: 'contents' }}>
-              <TableRow>
-                <TableCell colSpan={periods.length + 1} sx={{ fontWeight: 700, borderBottom: 'none' }}>
-                  {title}
-                </TableCell>
-              </TableRow>
-              {section.groupings.map((grouping) => (
-                <GroupingRows
-                  key={grouping.groupingId || grouping.groupingName}
-                  grouping={grouping}
-                  periods={periods}
-                  detailLevel={detailLevel}
-                  showPercentOfRevenue={showPercentOfRevenue}
-                  revenueByPeriod={revenueByPeriod}
-                />
-              ))}
-              <TableRow>
-                <TableCell sx={{ fontWeight: 700, borderTop: '2px solid #E3E5E8' }}>
-                  Total {title}
-                </TableCell>
-                {periods.map((p) => (
-                  <AmountCell
-                    key={p.label}
-                    amount={section.totalsByPeriod[p.label]}
-                    showPercentOfRevenue={showPercentOfRevenue}
-                    revenueForPeriod={revenueByPeriod?.[p.label]}
-                    bold
-                  />
-                ))}
-              </TableRow>
-            </Box>
-          ))}
-
-          {summaryRows.map((row) => (
-            <TableRow key={row.label}>
-              <TableCell sx={{ fontWeight: 700, bgcolor: 'grey.100' }}>{row.label}</TableCell>
-              {periods.map((p) => (
-                <TableCell key={p.label} align="right" sx={{ fontWeight: 700, bgcolor: 'grey.100' }}>
-                  {formatCurrency(row.valuesByPeriod[p.label])}
-                </TableCell>
-              ))}
-            </TableRow>
+          {rows.map((row) => (
+            <ReportRow
+              key={row.rowId}
+              row={row}
+              periods={periods}
+              detailLevel={detailLevel}
+              showPercentOfRevenue={showPercentOfRevenue}
+              revenueByPeriod={revenueByPeriod}
+            />
           ))}
         </TableBody>
       </Table>

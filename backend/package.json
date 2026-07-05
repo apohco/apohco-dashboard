@@ -7,7 +7,8 @@
     "build": "sam build",
     "local-api": "sam local start-api",
     "deploy": "sam deploy",
-    "db:migrate": "node src/db/migrate.js"
+    "db:migrate": "node src/db/migrate.js",
+    "db:backfill-report-layouts": "node src/db/backfillReportLayouts.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.699.0",

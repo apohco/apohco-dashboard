@@ -37,8 +37,23 @@ row exists (see section 6) and can be referenced as `CreatedBy` elsewhere.
    QBOs, QBOClasses, AccountGroupings, ChartOfAccountsMappings,
    ConsolidationGroups, ConsolidationGroupQBOs, CashFlowMappings,
    RawTransactions), plus the `Classification` column added for report sign
-   handling. Re-running is safe — already-applied migrations are tracked in
-   `schema_migrations` and skipped.
+   handling, and the `ReportLayoutRows`/`ReportLayoutRowComponents` tables
+   used by Settings > Report Layout. Re-running is safe — already-applied
+   migrations are tracked in `schema_migrations` and skipped.
+4. After migrations are applied (and before/around first use of Settings >
+   Report Layout), seed every existing Group's starting Report Layout so
+   its P&L/Balance Sheet/Cash Flow reports don't go blank — the report
+   Lambdas require a configured layout and no longer fall back to the old
+   alphabetical display:
+   ```
+   DB_HOST=<rds-endpoint> DB_NAME=apohco_dashboard DB_USER=<user> DB_PASSWORD=<password> npm run db:backfill-report-layouts
+   ```
+   This reproduces each Group's current report structure (Groupings in
+   today's order, plus the Total/Net rows today's reports compute
+   automatically, like Total Income/Total Expenses/Net Income) as their
+   starting layout, which can then be freely rearranged in Settings. Safe
+   to re-run — any Group+Statement that already has a layout (including one
+   a user has since customized) is left untouched.
 
 ## 2. Secrets Manager: app secrets
 

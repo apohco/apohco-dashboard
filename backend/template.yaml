@@ -374,11 +374,11 @@ Resources:
             Path: /api/settings/consolidation-groups/{consolidationGroupId}
             Method: any
 
-  ManageCashFlowMappingsFunction:
+  ManageReportLayoutFunction:
     Type: AWS::Serverless::Function
     Properties:
-      FunctionName: manageCashFlowMappings
-      Handler: src/functions/settings/manageCashFlowMappings/index.handler
+      FunctionName: manageReportLayout
+      Handler: src/functions/settings/manageReportLayout/index.handler
       Policies: *lambdaPolicies
       Environment: *cognitoAuthEnv
       Events:
@@ -386,7 +386,7 @@ Resources:
           Type: Api
           Properties:
             RestApiId: !Ref ApohcoDashboardApi
-            Path: /api/settings/cash-flow-mappings
+            Path: /api/settings/report-layout
             Method: any
 
   ManageQBOsFunction:

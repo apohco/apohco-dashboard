@@ -7,70 +7,42 @@ const {
   queryCumulativeBalance,
   queryPeriodActivity,
   displayAmount,
+  getReportLayout,
+  evaluateReportLayout,
 } = require('../../../shared/reportHelpers');
 
-function buildSection(periods, rowsByPeriodLabel, classification, detailLevel) {
-  const groupingMap = new Map();
+// Reduces this as-of-date's Asset/Liability/Equity balances into the two
+// maps evaluateReportLayout needs: cumulative balance per Grouping (per
+// period), and the underlying accounts per Grouping (for detail-level
+// rendering). Accounts with no assigned Grouping are kept under a `null`
+// key so evaluateReportLayout can still surface them via unassignedTotal.
+function buildAmountsByGroupingId(periods, rowsByPeriodLabel) {
+  const amountsByGroupingIdPerPeriod = new Map();
+  const accountsByGroupingIdMap = new Map();
 
   for (const period of periods) {
-    const rows = (rowsByPeriodLabel.get(period.label) || []).filter(
-      (r) => r.classification === classification
-    );
+    for (const row of rowsByPeriodLabel.get(period.label) || []) {
+      const groupingId = row.groupingid || null;
+      const amount = displayAmount(row.classification, row.rawsum);
 
-    for (const row of rows) {
-      const key = row.groupingid || 'ungrouped';
-      if (!groupingMap.has(key)) {
-        groupingMap.set(key, {
-          groupingId: row.groupingid || null,
-          groupingName: row.groupingname || 'Ungrouped',
-          accounts: new Map(),
-        });
-      }
-      const grouping = groupingMap.get(key);
+      if (!amountsByGroupingIdPerPeriod.has(groupingId)) amountsByGroupingIdPerPeriod.set(groupingId, {});
+      const byPeriod = amountsByGroupingIdPerPeriod.get(groupingId);
+      byPeriod[period.label] = (byPeriod[period.label] || 0) + amount;
 
+      if (!accountsByGroupingIdMap.has(groupingId)) accountsByGroupingIdMap.set(groupingId, new Map());
+      const accounts = accountsByGroupingIdMap.get(groupingId);
       const acctKey = row.accountcode || row.accountname;
-      if (!grouping.accounts.has(acctKey)) {
-        grouping.accounts.set(acctKey, {
-          accountCode: row.accountcode,
-          accountName: row.accountname,
-          amountsByPeriod: {},
-        });
+      if (!accounts.has(acctKey)) {
+        accounts.set(acctKey, { accountCode: row.accountcode, accountName: row.accountname, amountsByPeriod: {} });
       }
-      grouping.accounts.get(acctKey).amountsByPeriod[period.label] = displayAmount(
-        classification,
-        row.rawsum
-      );
+      accounts.get(acctKey).amountsByPeriod[period.label] = amount;
     }
   }
 
-  const groupings = [...groupingMap.values()].map((g) => {
-    const accounts = [...g.accounts.values()];
-    const subtotalsByPeriod = {};
-    for (const period of periods) {
-      subtotalsByPeriod[period.label] = accounts.reduce(
-        (sum, a) => sum + (a.amountsByPeriod[period.label] || 0),
-        0
-      );
-    }
-    return {
-      groupingId: g.groupingId,
-      groupingName: g.groupingName,
-      subtotalsByPeriod,
-      ...(detailLevel === 'detail' ? { accounts } : {}),
-    };
-  });
-
-  groupings.sort((a, b) => a.groupingName.localeCompare(b.groupingName));
-
-  const totalsByPeriod = {};
-  for (const period of periods) {
-    totalsByPeriod[period.label] = groupings.reduce(
-      (sum, g) => sum + (g.subtotalsByPeriod[period.label] || 0),
-      0
-    );
-  }
-
-  return { groupings, totalsByPeriod };
+  const accountsByGroupingId = new Map(
+    [...accountsByGroupingIdMap.entries()].map(([groupingId, m]) => [groupingId, [...m.values()]])
+  );
+  return { amountsByGroupingIdPerPeriod, accountsByGroupingId };
 }
 
 function fiscalYearStart(asOfDate) {
@@ -80,10 +52,12 @@ function fiscalYearStart(asOfDate) {
 // POST /api/reports/balance-sheet
 // Body: { groupId, entityType, entityId, periods: [{label, asOfDate}], detailLevel }
 // Balances are cumulative-since-inception as of each period's asOfDate.
-// Equity includes a computed "Net Income" line (current-fiscal-year P&L
-// activity through asOfDate) since APOHCO doesn't book a year-end closing
-// entry into retained earnings mid-year — this mirrors how QBO itself
-// presents an interim Balance Sheet.
+// Row order/subtotals come from this Group's configured BalanceSheet
+// Report Layout. That layout's one system row ("Net Income (current
+// year)") is fed the same YTD P&L computation this report always used --
+// APOHCO doesn't book a year-end closing entry into retained earnings
+// mid-year, so this mirrors how QBO itself presents an interim Balance
+// Sheet. Returns { configured: false } if no layout has been set up yet.
 exports.handler = withErrorHandling(async (event) => {
   const claims = await requireAuth(event);
   const { groupId, entityType, entityId, periods, detailLevel = 'summary' } = JSON.parse(
@@ -98,16 +72,17 @@ exports.handler = withErrorHandling(async (event) => {
   requireGroupAccess(claims, groupId);
 
   const entities = await resolveEntity(groupId, entityType, entityId);
+  const lastSyncedAt = await getLastSyncedAt(entities);
+
+  const layout = await getReportLayout(groupId, 'BalanceSheet');
+  if (!layout.configured) {
+    return json(200, { periods, detailLevel, lastSyncedAt, configured: false });
+  }
 
   const rowsByPeriodLabel = new Map();
   const netIncomeByPeriod = {};
   for (const period of periods) {
-    const rows = await queryCumulativeBalance(
-      groupId,
-      entities,
-      ['Asset', 'Liability', 'Equity'],
-      period.asOfDate
-    );
+    const rows = await queryCumulativeBalance(groupId, entities, ['Asset', 'Liability', 'Equity'], period.asOfDate);
     rowsByPeriodLabel.set(period.label, rows);
 
     const ytdActivity = await queryPeriodActivity(
@@ -126,34 +101,20 @@ exports.handler = withErrorHandling(async (event) => {
     netIncomeByPeriod[period.label] = revenue - expense;
   }
 
-  const assets = buildSection(periods, rowsByPeriodLabel, 'Asset', detailLevel);
-  const liabilities = buildSection(periods, rowsByPeriodLabel, 'Liability', detailLevel);
-  const equity = buildSection(periods, rowsByPeriodLabel, 'Equity', detailLevel);
+  const { amountsByGroupingIdPerPeriod, accountsByGroupingId } = buildAmountsByGroupingId(
+    periods,
+    rowsByPeriodLabel
+  );
 
-  equity.groupings.push({
-    groupingId: null,
-    groupingName: 'Net Income (current year)',
-    subtotalsByPeriod: netIncomeByPeriod,
+  const evaluated = evaluateReportLayout(layout.rows, periods, amountsByGroupingIdPerPeriod, {
+    netIncomeByPeriod,
+    accountsByGroupingId: detailLevel === 'detail' ? accountsByGroupingId : undefined,
   });
-  for (const period of periods) {
-    equity.totalsByPeriod[period.label] =
-      (equity.totalsByPeriod[period.label] || 0) + netIncomeByPeriod[period.label];
-  }
-
-  const liabilitiesAndEquityByPeriod = {};
-  for (const period of periods) {
-    liabilitiesAndEquityByPeriod[period.label] =
-      (liabilities.totalsByPeriod[period.label] || 0) + (equity.totalsByPeriod[period.label] || 0);
-  }
 
   return json(200, {
     periods,
     detailLevel,
-    lastSyncedAt: await getLastSyncedAt(entities),
-    assets,
-    liabilities,
-    equity,
-    totalAssetsByPeriod: assets.totalsByPeriod,
-    totalLiabilitiesAndEquityByPeriod: liabilitiesAndEquityByPeriod,
+    lastSyncedAt,
+    ...evaluated,
   });
 });

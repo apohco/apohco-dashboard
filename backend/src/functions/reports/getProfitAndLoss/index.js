@@ -6,76 +6,50 @@ const {
   getLastSyncedAt,
   queryPeriodActivity,
   displayAmount,
+  getReportLayout,
+  evaluateReportLayout,
 } = require('../../../shared/reportHelpers');
 
-// Builds { groupings: [{groupingId, groupingName, subtotalsByPeriod, accounts?}], totalsByPeriod }
-// for one P&L section (Income or Expense) from the per-period line-item rows.
-function buildSection(periods, rowsByPeriodLabel, classification, detailLevel) {
-  const groupingMap = new Map(); // groupingId (or 'ungrouped') -> { groupingId, groupingName, accounts: Map }
+// Reduces this period's Revenue/Expense line items into the two maps
+// evaluateReportLayout needs: total amount per Grouping (per period), and
+// the underlying accounts per Grouping (for detail-level rendering).
+// Accounts with no assigned Grouping are kept under a `null` key so
+// evaluateReportLayout can still surface them via unassignedTotal instead
+// of silently vanishing.
+function buildAmountsByGroupingId(periods, rowsByPeriodLabel) {
+  const amountsByGroupingIdPerPeriod = new Map();
+  const accountsByGroupingIdMap = new Map();
 
   for (const period of periods) {
-    const rows = (rowsByPeriodLabel.get(period.label) || []).filter(
-      (r) => r.classification === classification
-    );
+    for (const row of rowsByPeriodLabel.get(period.label) || []) {
+      const groupingId = row.groupingid || null;
+      const amount = displayAmount(row.classification, row.rawsum);
 
-    for (const row of rows) {
-      const key = row.groupingid || 'ungrouped';
-      if (!groupingMap.has(key)) {
-        groupingMap.set(key, {
-          groupingId: row.groupingid || null,
-          groupingName: row.groupingname || 'Ungrouped',
-          accounts: new Map(),
-        });
-      }
-      const grouping = groupingMap.get(key);
+      if (!amountsByGroupingIdPerPeriod.has(groupingId)) amountsByGroupingIdPerPeriod.set(groupingId, {});
+      const byPeriod = amountsByGroupingIdPerPeriod.get(groupingId);
+      byPeriod[period.label] = (byPeriod[period.label] || 0) + amount;
 
+      if (!accountsByGroupingIdMap.has(groupingId)) accountsByGroupingIdMap.set(groupingId, new Map());
+      const accounts = accountsByGroupingIdMap.get(groupingId);
       const acctKey = row.accountcode || row.accountname;
-      if (!grouping.accounts.has(acctKey)) {
-        grouping.accounts.set(acctKey, {
-          accountCode: row.accountcode,
-          accountName: row.accountname,
-          amountsByPeriod: {},
-        });
+      if (!accounts.has(acctKey)) {
+        accounts.set(acctKey, { accountCode: row.accountcode, accountName: row.accountname, amountsByPeriod: {} });
       }
-      grouping.accounts.get(acctKey).amountsByPeriod[period.label] = displayAmount(
-        classification,
-        row.rawsum
-      );
+      accounts.get(acctKey).amountsByPeriod[period.label] = amount;
     }
   }
 
-  const groupings = [...groupingMap.values()].map((g) => {
-    const accounts = [...g.accounts.values()];
-    const subtotalsByPeriod = {};
-    for (const period of periods) {
-      subtotalsByPeriod[period.label] = accounts.reduce(
-        (sum, a) => sum + (a.amountsByPeriod[period.label] || 0),
-        0
-      );
-    }
-    return {
-      groupingId: g.groupingId,
-      groupingName: g.groupingName,
-      subtotalsByPeriod,
-      ...(detailLevel === 'detail' ? { accounts } : {}),
-    };
-  });
-
-  groupings.sort((a, b) => a.groupingName.localeCompare(b.groupingName));
-
-  const totalsByPeriod = {};
-  for (const period of periods) {
-    totalsByPeriod[period.label] = groupings.reduce(
-      (sum, g) => sum + (g.subtotalsByPeriod[period.label] || 0),
-      0
-    );
-  }
-
-  return { groupings, totalsByPeriod };
+  const accountsByGroupingId = new Map(
+    [...accountsByGroupingIdMap.entries()].map(([groupingId, m]) => [groupingId, [...m.values()]])
+  );
+  return { amountsByGroupingIdPerPeriod, accountsByGroupingId };
 }
 
 // POST /api/reports/profit-and-loss
 // Body: { groupId, entityType, entityId, periods: [{label, startDate, endDate}], detailLevel }
+// Row order/subtotals come entirely from this Group's configured PL Report
+// Layout (Settings > Report Layout) -- see reportHelpers.evaluateReportLayout.
+// Returns { configured: false } if no layout has been set up yet.
 exports.handler = withErrorHandling(async (event) => {
   const claims = await requireAuth(event);
   const { groupId, entityType, entityId, periods, detailLevel = 'summary' } = JSON.parse(
@@ -90,6 +64,12 @@ exports.handler = withErrorHandling(async (event) => {
   requireGroupAccess(claims, groupId);
 
   const entities = await resolveEntity(groupId, entityType, entityId);
+  const lastSyncedAt = await getLastSyncedAt(entities);
+
+  const layout = await getReportLayout(groupId, 'PL');
+  if (!layout.configured) {
+    return json(200, { periods, detailLevel, lastSyncedAt, configured: false });
+  }
 
   const rowsByPeriodLabel = new Map();
   for (const period of periods) {
@@ -103,21 +83,19 @@ exports.handler = withErrorHandling(async (event) => {
     rowsByPeriodLabel.set(period.label, rows);
   }
 
-  const income = buildSection(periods, rowsByPeriodLabel, 'Revenue', detailLevel);
-  const expenses = buildSection(periods, rowsByPeriodLabel, 'Expense', detailLevel);
+  const { amountsByGroupingIdPerPeriod, accountsByGroupingId } = buildAmountsByGroupingId(
+    periods,
+    rowsByPeriodLabel
+  );
 
-  const netIncomeByPeriod = {};
-  for (const period of periods) {
-    netIncomeByPeriod[period.label] =
-      (income.totalsByPeriod[period.label] || 0) - (expenses.totalsByPeriod[period.label] || 0);
-  }
+  const evaluated = evaluateReportLayout(layout.rows, periods, amountsByGroupingIdPerPeriod, {
+    accountsByGroupingId: detailLevel === 'detail' ? accountsByGroupingId : undefined,
+  });
 
   return json(200, {
     periods,
     detailLevel,
-    lastSyncedAt: await getLastSyncedAt(entities),
-    income,
-    expenses,
-    netIncomeByPeriod,
+    lastSyncedAt,
+    ...evaluated,
   });
 });

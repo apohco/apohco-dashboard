@@ -3,6 +3,7 @@ import dayjs from 'dayjs';
 import { Box, Typography, TextField, CircularProgress, Alert } from '@mui/material';
 import ReportToolbar from '../../components/reports/ReportToolbar';
 import ReportTable from '../../components/reports/ReportTable';
+import ReportNotConfigured from '../../components/reports/ReportNotConfigured';
 import EmptyState from '../../components/EmptyState';
 import { useAuth } from '../../context/AuthContext';
 import useEntityOptions, { parseEntityValue } from '../../hooks/useEntityOptions';
@@ -34,12 +35,6 @@ export default function CashFlowReport() {
       .catch(setError)
       .finally(() => setLoading(false));
   }, [groupId, entity, periods, detailLevel]);
-
-  const isEmpty =
-    report &&
-    report.operations.groupings.length === 0 &&
-    report.investing.groupings.length === 0 &&
-    report.financing.groupings.length === 0;
 
   return (
     <Box>
@@ -74,20 +69,12 @@ export default function CashFlowReport() {
         </Box>
       )}
       {error && <Alert severity="error">{error.response?.data?.message || error.message}</Alert>}
-      {isEmpty && (
-        <EmptyState message="No Cash Flow Groupings are configured yet. Assign Groupings to Operations/Investing/Financing in Settings, then run a data sync." />
+      {report && !loading && report.configured === false && <ReportNotConfigured statementLabel="Cash Flow" />}
+      {report && !loading && report.configured && !report.lastSyncedAt && (
+        <EmptyState message="No Cash Flow data available for this selection. Connect a QBO and run a data sync to get started." />
       )}
-      {report && !loading && !isEmpty && (
-        <ReportTable
-          periods={periods}
-          detailLevel={detailLevel}
-          sections={[
-            { title: 'Operations', section: report.operations },
-            { title: 'Investing', section: report.investing },
-            { title: 'Financing', section: report.financing },
-          ]}
-          summaryRows={[{ label: 'Net Cash Change', valuesByPeriod: report.netCashChangeByPeriod }]}
-        />
+      {report && !loading && report.configured && report.lastSyncedAt && (
+        <ReportTable periods={periods} detailLevel={detailLevel} rows={report.rows} />
       )}
     </Box>
   );

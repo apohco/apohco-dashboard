@@ -64,12 +64,13 @@ export const deleteConsolidationGroup = (consolidationGroupId, groupId) =>
     params: { groupId },
   });
 
-// Cash Flow Mappings
-export const listCashFlowMappings = (groupId) =>
-  apiClient.get('/api/settings/cash-flow-mappings', { params: { groupId } }).then((r) => r.data);
+// Report Layout (per-Statement ordered Grouping/Total/Net rows — replaces
+// the old Cash Flow Mappings page, which is now just one Statement's layout)
+export const getReportLayout = (groupId, statement) =>
+  apiClient.get('/api/settings/report-layout', { params: { groupId, statement } }).then((r) => r.data);
 
-export const saveCashFlowMappings = (groupId, mappings) =>
-  apiClient.put('/api/settings/cash-flow-mappings', { groupId, mappings }).then((r) => r.data);
+export const saveReportLayout = (groupId, statement, rows) =>
+  apiClient.put('/api/settings/report-layout', { groupId, statement, rows }).then((r) => r.data);
 
 // QBOs
 export const listQBOs = (groupId) =>

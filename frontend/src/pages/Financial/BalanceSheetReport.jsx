@@ -3,6 +3,7 @@ import dayjs from 'dayjs';
 import { Box, Typography, TextField, CircularProgress, Alert } from '@mui/material';
 import ReportToolbar from '../../components/reports/ReportToolbar';
 import ReportTable from '../../components/reports/ReportTable';
+import ReportNotConfigured from '../../components/reports/ReportNotConfigured';
 import EmptyState from '../../components/EmptyState';
 import { useAuth } from '../../context/AuthContext';
 import useEntityOptions, { parseEntityValue } from '../../hooks/useEntityOptions';
@@ -34,9 +35,6 @@ export default function BalanceSheetReport() {
       .catch(setError)
       .finally(() => setLoading(false));
   }, [groupId, entity, periods, detailLevel]);
-
-  const isEmpty =
-    report && report.assets.groupings.length === 0 && report.liabilities.groupings.length === 0;
 
   return (
     <Box>
@@ -71,23 +69,12 @@ export default function BalanceSheetReport() {
         </Box>
       )}
       {error && <Alert severity="error">{error.response?.data?.message || error.message}</Alert>}
-      {isEmpty && (
+      {report && !loading && report.configured === false && <ReportNotConfigured statementLabel="Balance Sheet" />}
+      {report && !loading && report.configured && !report.lastSyncedAt && (
         <EmptyState message="No Balance Sheet data available for this selection. Connect a QBO and run a data sync to get started." />
       )}
-      {report && !loading && !isEmpty && (
-        <ReportTable
-          periods={periods}
-          detailLevel={detailLevel}
-          sections={[
-            { title: 'Assets', section: report.assets },
-            { title: 'Liabilities', section: report.liabilities },
-            { title: 'Equity', section: report.equity },
-          ]}
-          summaryRows={[
-            { label: 'Total Assets', valuesByPeriod: report.totalAssetsByPeriod },
-            { label: 'Total Liabilities & Equity', valuesByPeriod: report.totalLiabilitiesAndEquityByPeriod },
-          ]}
-        />
+      {report && !loading && report.configured && report.lastSyncedAt && (
+        <ReportTable periods={periods} detailLevel={detailLevel} rows={report.rows} />
       )}
     </Box>
   );

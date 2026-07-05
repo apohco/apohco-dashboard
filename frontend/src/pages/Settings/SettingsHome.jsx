@@ -8,7 +8,7 @@ const settingsSections = [
   { label: 'Chart of Accounts', path: '/settings/chart-of-accounts', roles: ['Owner', 'Manager'] },
   { label: 'Consolidation Groups', path: '/settings/consolidation-groups', roles: ['Owner', 'Manager'] },
   { label: 'QBO Data Sync', path: '/settings/qbo-data-sync', roles: ['Owner', 'Manager', 'SoftwareRep', 'SoftwareAdmin'] },
-  { label: 'Cash Flow Configuration', path: '/settings/cash-flow-configuration', roles: ['Owner', 'Manager'] },
+  { label: 'Report Layout', path: '/settings/report-layout', roles: ['Owner', 'Manager'] },
 ];
 
 export default function SettingsHome() {

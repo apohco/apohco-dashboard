@@ -11,7 +11,7 @@ import QBOSetup from '../pages/Settings/QBOSetup';
 import ChartOfAccountsSetup from '../pages/Settings/ChartOfAccountsSetup';
 import ConsolidationGroups from '../pages/Settings/ConsolidationGroups';
 import QBODataSync from '../pages/Settings/QBODataSync';
-import CashFlowConfiguration from '../pages/Settings/CashFlowConfiguration';
+import ReportLayout from '../pages/Settings/ReportLayout';
 
 export default function AppRoutes() {
   return (
@@ -29,7 +29,7 @@ export default function AppRoutes() {
           <Route path="settings/chart-of-accounts" element={<ChartOfAccountsSetup />} />
           <Route path="settings/consolidation-groups" element={<ConsolidationGroups />} />
           <Route path="settings/qbo-data-sync" element={<QBODataSync />} />
-          <Route path="settings/cash-flow-configuration" element={<CashFlowConfiguration />} />
+          <Route path="settings/report-layout" element={<ReportLayout />} />
           <Route path="*" element={<Navigate to="/financial/profit-and-loss" replace />} />
         </Route>
       </Route>

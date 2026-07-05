@@ -144,6 +144,120 @@ function displayAmount(classification, rawSum) {
   return creditNormal.includes(classification) ? -amount : amount;
 }
 
+// Fetches a Group's configured Report Layout for one Statement
+// (PL/BalanceSheet/CashFlow) as an ordered list of rows, each carrying its
+// Total/Net component references (also ordered — for a Net row, the first
+// component is the positive operand, the second is subtracted). Returns
+// configured: false when nothing has been set up yet, so callers can show
+// an empty/prompt state instead of guessing a fallback structure.
+async function getReportLayout(groupId, statement) {
+  const { rows } = await query(
+    `SELECT RowId, RowType, Label, GroupingId, IsSystemRow, IsRevenueBase, SortOrder
+     FROM ReportLayoutRows
+     WHERE GroupId = $1 AND Statement = $2
+     ORDER BY SortOrder`,
+    [groupId, statement]
+  );
+  if (!rows.length) return { configured: false, rows: [] };
+
+  const rowIds = rows.map((r) => r.rowid);
+  const { rows: componentRows } = await query(
+    `SELECT RowId, ComponentRowId, SortOrder
+     FROM ReportLayoutRowComponents
+     WHERE RowId = ANY($1::uuid[])
+     ORDER BY RowId, SortOrder`,
+    [rowIds]
+  );
+  const componentsByRowId = new Map();
+  for (const c of componentRows) {
+    if (!componentsByRowId.has(c.rowid)) componentsByRowId.set(c.rowid, []);
+    componentsByRowId.get(c.rowid).push(c.componentrowid);
+  }
+
+  return {
+    configured: true,
+    rows: rows.map((r) => ({
+      rowId: r.rowid,
+      rowType: r.rowtype,
+      label: r.label,
+      groupingId: r.groupingid,
+      isSystemRow: r.issystemrow,
+      isRevenueBase: r.isrevenuebase,
+      componentRowIds: componentsByRowId.get(r.rowid) || [],
+    })),
+  };
+}
+
+// Evaluates a fetched Report Layout against this period's per-Grouping
+// amounts, producing the flat ordered row list a report response returns.
+// Pure function (no DB access) so it's easy to reason about/test in
+// isolation from getReportLayout's fetch. `amountsByGroupingIdPerPeriod` is
+// a Map<groupingId, {[periodLabel]: amount}>; `accountsByGroupingId` is a
+// Map<groupingId, accounts[]> for detail-level rendering;
+// `netIncomeByPeriod` (Balance Sheet only) supplies the value for the
+// IsSystemRow "Net Income (current year)" row, which has no real
+// GroupingId to look up.
+function evaluateReportLayout(
+  layoutRows,
+  periods,
+  amountsByGroupingIdPerPeriod,
+  { netIncomeByPeriod, accountsByGroupingId } = {}
+) {
+  const valuesByRowId = new Map();
+  const usedGroupingIds = new Set();
+
+  const resultRows = layoutRows.map((row) => {
+    const valuesByPeriod = {};
+
+    if (row.rowType === 'Grouping') {
+      if (row.groupingId) usedGroupingIds.add(row.groupingId);
+      for (const period of periods) {
+        valuesByPeriod[period.label] = row.isSystemRow
+          ? netIncomeByPeriod?.[period.label] || 0
+          : amountsByGroupingIdPerPeriod.get(row.groupingId)?.[period.label] || 0;
+      }
+    } else if (row.rowType === 'Total') {
+      for (const period of periods) {
+        valuesByPeriod[period.label] = row.componentRowIds.reduce(
+          (sum, componentRowId) => sum + (valuesByRowId.get(componentRowId)?.[period.label] || 0),
+          0
+        );
+      }
+    } else if (row.rowType === 'Net') {
+      const [positiveId, negativeId] = row.componentRowIds;
+      for (const period of periods) {
+        const positive = valuesByRowId.get(positiveId)?.[period.label] || 0;
+        const negative = valuesByRowId.get(negativeId)?.[period.label] || 0;
+        valuesByPeriod[period.label] = positive - negative;
+      }
+    }
+
+    valuesByRowId.set(row.rowId, valuesByPeriod);
+
+    return {
+      rowId: row.rowId,
+      rowType: row.rowType,
+      label: row.label,
+      isRevenueBase: row.isRevenueBase,
+      valuesByPeriod,
+      ...(row.rowType === 'Grouping' && !row.isSystemRow && accountsByGroupingId
+        ? { accounts: accountsByGroupingId.get(row.groupingId) || [] }
+        : {}),
+    };
+  });
+
+  const unassignedTotal = {};
+  for (const period of periods) {
+    let total = 0;
+    for (const [groupingId, amountsByPeriod] of amountsByGroupingIdPerPeriod) {
+      if (!usedGroupingIds.has(groupingId)) total += amountsByPeriod[period.label] || 0;
+    }
+    unassignedTotal[period.label] = total;
+  }
+
+  return { configured: true, rows: resultRows, unassignedTotal };
+}
+
 module.exports = {
   resolveEntity,
   buildEntityWhereClause,
@@ -151,4 +265,6 @@ module.exports = {
   queryPeriodActivity,
   queryCumulativeBalance,
   displayAmount,
+  getReportLayout,
+  evaluateReportLayout,
 };

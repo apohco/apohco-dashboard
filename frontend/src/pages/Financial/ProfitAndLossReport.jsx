@@ -3,6 +3,7 @@ import dayjs from 'dayjs';
 import { Box, Typography, ToggleButton, ToggleButtonGroup, TextField, CircularProgress, Alert } from '@mui/material';
 import ReportToolbar from '../../components/reports/ReportToolbar';
 import ReportTable from '../../components/reports/ReportTable';
+import ReportNotConfigured from '../../components/reports/ReportNotConfigured';
 import EmptyState from '../../components/EmptyState';
 import { useAuth } from '../../context/AuthContext';
 import useEntityOptions, { parseEntityValue } from '../../hooks/useEntityOptions';
@@ -127,20 +128,17 @@ export default function ProfitAndLossReport() {
         </Box>
       )}
       {error && <Alert severity="error">{error.response?.data?.message || error.message}</Alert>}
-      {report && !loading && report.income.groupings.length === 0 && report.expenses.groupings.length === 0 && (
+      {report && !loading && report.configured === false && <ReportNotConfigured statementLabel="Profit & Loss" />}
+      {report && !loading && report.configured && !report.lastSyncedAt && (
         <EmptyState message="No P&L data available for this selection. Connect a QBO and run a data sync to get started." />
       )}
-      {report && !loading && (report.income.groupings.length > 0 || report.expenses.groupings.length > 0) && (
+      {report && !loading && report.configured && report.lastSyncedAt && (
         <ReportTable
           periods={periods}
           detailLevel={detailLevel}
           showPercentOfRevenue={showPercentOfRevenue}
-          revenueByPeriod={report.income.totalsByPeriod}
-          sections={[
-            { title: 'Income', section: report.income },
-            { title: 'Expenses', section: report.expenses },
-          ]}
-          summaryRows={[{ label: 'Net Income', valuesByPeriod: report.netIncomeByPeriod }]}
+          revenueByPeriod={report.rows.find((r) => r.isRevenueBase)?.valuesByPeriod}
+          rows={report.rows}
         />
       )}
     </Box>
