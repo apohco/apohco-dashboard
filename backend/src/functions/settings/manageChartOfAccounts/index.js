@@ -2,6 +2,7 @@ const { requireAuth } = require('../../../shared/verifyToken');
 const { requireRole, requireGroupAccess } = require('../../../shared/authorize');
 const { query, withTransaction } = require('../../../shared/db');
 const { json, withErrorHandling } = require('../../../shared/response');
+const { VALID_CLASSIFICATIONS } = require('../../../shared/fileParser');
 
 // /api/settings/chart-of-accounts   GET, PUT
 // The account list itself is kept current by syncQBOData (which
@@ -41,14 +42,34 @@ exports.handler = withErrorHandling(async (event) => {
       }
       requireGroupAccess(claims, groupId);
 
+      for (const m of mappings) {
+        if (m.classification && !VALID_CLASSIFICATIONS.includes(m.classification)) {
+          const err = new Error(`classification must be one of ${VALID_CLASSIFICATIONS.join(', ')}`);
+          err.statusCode = 400;
+          throw err;
+        }
+      }
+
+      // classification is optional in the payload -- omitted for a plain
+      // Grouping-only save (the common case), included when the user
+      // corrects a misclassified account (see Chart of Accounts Setup).
       await withTransaction(async (client) => {
         for (const m of mappings) {
-          await client.query(
-            `UPDATE ChartOfAccountsMappings
-             SET GroupingId = $1, LastUpdated = now(), UpdatedBy = $2
-             WHERE MappingId = $3 AND GroupId = $4`,
-            [m.groupingId || null, claims.userId, m.mappingId, groupId]
-          );
+          if (m.classification) {
+            await client.query(
+              `UPDATE ChartOfAccountsMappings
+               SET GroupingId = $1, Classification = $2, LastUpdated = now(), UpdatedBy = $3
+               WHERE MappingId = $4 AND GroupId = $5`,
+              [m.groupingId || null, m.classification, claims.userId, m.mappingId, groupId]
+            );
+          } else {
+            await client.query(
+              `UPDATE ChartOfAccountsMappings
+               SET GroupingId = $1, LastUpdated = now(), UpdatedBy = $2
+               WHERE MappingId = $3 AND GroupId = $4`,
+              [m.groupingId || null, claims.userId, m.mappingId, groupId]
+            );
+          }
         }
       });
 

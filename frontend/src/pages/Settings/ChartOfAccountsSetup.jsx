@@ -33,6 +33,7 @@ import {
 const CREATE_NEW = '__create_new__';
 
 const PL_CLASSIFICATIONS = new Set(['Revenue', 'Expense']);
+const CLASSIFICATIONS = ['Asset', 'Liability', 'Equity', 'Revenue', 'Expense'];
 
 function CopyGroupingsDialog({ open, onClose, groupId, currentQboId, qbos, accounts, onApply }) {
   const [sourceQboId, setSourceQboId] = useState('');
@@ -124,6 +125,7 @@ export default function ChartOfAccountsSetup() {
   const [accounts, setAccounts] = useState([]);
   const [groupings, setGroupings] = useState([]);
   const [pendingGroupingByMapping, setPendingGroupingByMapping] = useState({});
+  const [pendingClassificationByMapping, setPendingClassificationByMapping] = useState({});
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState(null);
   const [error, setError] = useState(null);
@@ -140,6 +142,7 @@ export default function ChartOfAccountsSetup() {
     listChartOfAccounts(groupId, qboId).then((rows) => {
       setAccounts(rows);
       setPendingGroupingByMapping({});
+      setPendingClassificationByMapping({});
     });
   };
 
@@ -157,11 +160,16 @@ export default function ChartOfAccountsSetup() {
       ? pendingGroupingByMapping[row.mappingid]
       : row.groupingid;
 
+  const currentClassification = (row) =>
+    Object.prototype.hasOwnProperty.call(pendingClassificationByMapping, row.mappingid)
+      ? pendingClassificationByMapping[row.mappingid]
+      : row.classification;
+
   const handleGroupingChange = async (row, value) => {
     if (value === CREATE_NEW) {
       const name = window.prompt('New Grouping name:');
       if (!name) return;
-      const accountType = PL_CLASSIFICATIONS.has(row.classification) ? 'PL' : 'BalanceSheet';
+      const accountType = PL_CLASSIFICATIONS.has(currentClassification(row)) ? 'PL' : 'BalanceSheet';
       const created = await createAccountGrouping(groupId, name, accountType);
       setGroupings((prev) => [...prev, created]);
       setPendingGroupingByMapping((prev) => ({ ...prev, [row.mappingid]: created.groupingid }));
@@ -170,24 +178,42 @@ export default function ChartOfAccountsSetup() {
     setPendingGroupingByMapping((prev) => ({ ...prev, [row.mappingid]: value || null }));
   };
 
+  // Changing an account's Classification (e.g. fixing one that was
+  // misclassified during an earlier upload -- see Report Layout / P&L
+  // sign issues) can move it between the PL and Balance Sheet Grouping
+  // buckets, so any already-selected Grouping may no longer be valid;
+  // clear it and make the user pick again rather than silently keep a
+  // Grouping of the wrong AccountType.
+  const handleClassificationChange = (row, value) => {
+    setPendingClassificationByMapping((prev) => ({ ...prev, [row.mappingid]: value }));
+    setPendingGroupingByMapping((prev) => ({ ...prev, [row.mappingid]: null }));
+  };
+
   const handleCopyApplied = (updates, matched, total) => {
     setPendingGroupingByMapping((prev) => ({ ...prev, ...updates }));
     setMessage(`Copied groupings for ${matched} of ${total} account(s). Review below, then Save.`);
   };
 
-  const dirtyCount = Object.keys(pendingGroupingByMapping).length;
+  const dirtyMappingIds = new Set([
+    ...Object.keys(pendingGroupingByMapping),
+    ...Object.keys(pendingClassificationByMapping),
+  ]);
+  const dirtyCount = dirtyMappingIds.size;
 
   const handleSave = async () => {
     setSaving(true);
     setMessage(null);
     setError(null);
     try {
-      const mappings = Object.entries(pendingGroupingByMapping).map(([mappingId, groupingId]) => ({
+      const mappings = [...dirtyMappingIds].map((mappingId) => ({
         mappingId,
-        groupingId,
+        groupingId: Object.prototype.hasOwnProperty.call(pendingGroupingByMapping, mappingId)
+          ? pendingGroupingByMapping[mappingId]
+          : accounts.find((a) => a.mappingid === mappingId)?.groupingid || null,
+        classification: pendingClassificationByMapping[mappingId],
       }));
       await saveChartOfAccounts(groupId, mappings);
-      setMessage(`Saved ${mappings.length} account grouping assignment(s).`);
+      setMessage(`Saved ${mappings.length} account change(s).`);
       refreshAccounts();
     } catch (err) {
       setError(err);
@@ -257,7 +283,24 @@ export default function ChartOfAccountsSetup() {
                   <TableRow key={row.mappingid}>
                     <TableCell>{row.accountcode}</TableCell>
                     <TableCell>{row.accountname}</TableCell>
-                    <TableCell>{row.classification || '—'}</TableCell>
+                    <TableCell sx={{ minWidth: 140 }}>
+                      <Select
+                        size="small"
+                        fullWidth
+                        displayEmpty
+                        value={currentClassification(row) || ''}
+                        onChange={(e) => handleClassificationChange(row, e.target.value)}
+                      >
+                        <MenuItem value="" disabled>
+                          <em>Unclassified</em>
+                        </MenuItem>
+                        {CLASSIFICATIONS.map((c) => (
+                          <MenuItem key={c} value={c}>
+                            {c}
+                          </MenuItem>
+                        ))}
+                      </Select>
+                    </TableCell>
                     <TableCell sx={{ minWidth: 220 }}>
                       <Select
                         size="small"
@@ -269,7 +312,7 @@ export default function ChartOfAccountsSetup() {
                         <MenuItem value="">
                           <em>Unassigned</em>
                         </MenuItem>
-                        {groupingOptionsFor(row.classification).map((g) => (
+                        {groupingOptionsFor(currentClassification(row)).map((g) => (
                           <MenuItem key={g.groupingid} value={g.groupingid}>
                             {g.groupingname}
                           </MenuItem>
