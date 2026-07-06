@@ -207,7 +207,17 @@ function parseTransactionFile(buffer, fileExtension, knownClassifications = {}) 
 
     const debit = parseNumber(debitField);
     const credit = parseNumber(creditField);
-    const amount = !isBlank(amountField) ? parseNumber(amountField) : debit - credit;
+    // Prefer Debit-Credit over a supplied Amount column whenever either
+    // Debit or Credit is present: QBO's own General Ledger export reports
+    // Amount as the transaction's magnitude on whichever side it landed
+    // (effectively unsigned/always-positive), not as a signed Debit-minus-
+    // Credit value. Blindly trusting Amount when it's non-blank silently
+    // flips the sign of every credit-side (Revenue/Liability/Equity-
+    // increasing) row that also happens to carry an Amount column, which
+    // is exactly what QBO's own export does for revenue accounts. Only
+    // fall back to the raw Amount field when a row has neither Debit nor
+    // Credit at all (a file with just an Amount column).
+    const amount = !isBlank(debitField) || !isBlank(creditField) ? debit - credit : parseNumber(amountField);
 
     const rowErrors = [];
     if (!transactionDate) rowErrors.push('invalid or missing TransactionDate');
