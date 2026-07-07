@@ -28,6 +28,7 @@ import {
 import ArrowUpwardIcon from '@mui/icons-material/ArrowUpward';
 import ArrowDownwardIcon from '@mui/icons-material/ArrowDownward';
 import DeleteIcon from '@mui/icons-material/Delete';
+import EditIcon from '@mui/icons-material/Edit';
 import StarIcon from '@mui/icons-material/Star';
 import StarBorderIcon from '@mui/icons-material/StarBorder';
 import { useAuth } from '../../context/AuthContext';
@@ -51,9 +52,14 @@ function accountTypesFor(statement) {
   return ['PL', 'BalanceSheet'];
 }
 
-// New rows always append at the end, so every row currently staged is a
-// valid "earlier row" a Total/Net can reference.
-function AddRowDialog({ open, onClose, availableGroupings, earlierRows, onAdd }) {
+// Add mode: `earlierRows` is every row currently staged (new rows always
+// append at the end, so all of them qualify). Edit mode (`editingRow` set):
+// `earlierRows` must be pre-scoped by the caller to only the rows strictly
+// above the row being edited, so a Total/Net can't be pointed at itself or
+// at something after it. rowType is locked once editing an existing row --
+// switching Total<->Net<->Grouping mid-edit would need very different
+// fields, so that's just delete-and-re-add.
+function RowDialog({ open, onClose, availableGroupings, earlierRows, editingRow, onSubmit }) {
   const [rowType, setRowType] = useState('Grouping');
   const [groupingId, setGroupingId] = useState('');
   const [label, setLabel] = useState('');
@@ -63,38 +69,38 @@ function AddRowDialog({ open, onClose, availableGroupings, earlierRows, onAdd })
 
   useEffect(() => {
     if (!open) return;
-    setRowType('Grouping');
-    setGroupingId('');
-    setLabel('');
-    setComponentIds([]);
-    setNetPositiveId('');
-    setNetNegativeId('');
-  }, [open]);
+    if (editingRow) {
+      setRowType(editingRow.rowType);
+      setGroupingId(editingRow.groupingId || '');
+      setLabel(editingRow.label || '');
+      setComponentIds(editingRow.rowType === 'Total' ? editingRow.componentTempIds || [] : []);
+      setNetPositiveId(editingRow.rowType === 'Net' ? editingRow.componentTempIds?.[0] || '' : '');
+      setNetNegativeId(editingRow.rowType === 'Net' ? editingRow.componentTempIds?.[1] || '' : '');
+    } else {
+      setRowType('Grouping');
+      setGroupingId('');
+      setLabel('');
+      setComponentIds([]);
+      setNetPositiveId('');
+      setNetNegativeId('');
+    }
+  }, [open, editingRow]);
 
   const selectedGrouping = availableGroupings.find((g) => g.groupingid === groupingId);
-  const canAdd =
+  const canSubmit =
     (rowType === 'Grouping' && Boolean(groupingId)) ||
     (rowType === 'Total' && label.trim() && componentIds.length > 0) ||
     (rowType === 'Net' && label.trim() && netPositiveId && netNegativeId && netPositiveId !== netNegativeId);
 
-  const handleAdd = () => {
-    if (!canAdd) return;
+  const handleSubmit = () => {
+    if (!canSubmit) return;
+    const tempId = editingRow ? editingRow.tempId : newTempId();
     if (rowType === 'Grouping') {
-      onAdd({
-        tempId: newTempId(),
-        rowType: 'Grouping',
-        label: label.trim() || selectedGrouping?.groupingname,
-        groupingId,
-      });
+      onSubmit({ tempId, rowType: 'Grouping', label: label.trim() || selectedGrouping?.groupingname, groupingId });
     } else if (rowType === 'Total') {
-      onAdd({ tempId: newTempId(), rowType: 'Total', label: label.trim(), componentTempIds: componentIds });
+      onSubmit({ tempId, rowType: 'Total', label: label.trim(), componentTempIds: componentIds });
     } else {
-      onAdd({
-        tempId: newTempId(),
-        rowType: 'Net',
-        label: label.trim(),
-        componentTempIds: [netPositiveId, netNegativeId],
-      });
+      onSubmit({ tempId, rowType: 'Net', label: label.trim(), componentTempIds: [netPositiveId, netNegativeId] });
     }
     onClose();
   };
@@ -105,9 +111,15 @@ function AddRowDialog({ open, onClose, availableGroupings, earlierRows, onAdd })
 
   return (
     <Dialog open={open} onClose={onClose} maxWidth="sm" fullWidth>
-      <DialogTitle>Add Row</DialogTitle>
+      <DialogTitle>{editingRow ? 'Edit Row' : 'Add Row'}</DialogTitle>
       <DialogContent sx={{ display: 'flex', flexDirection: 'column', gap: 2, pt: 1 }}>
-        <ToggleButtonGroup size="small" exclusive value={rowType} onChange={(e, v) => v && setRowType(v)}>
+        <ToggleButtonGroup
+          size="small"
+          exclusive
+          value={rowType}
+          onChange={(e, v) => v && setRowType(v)}
+          disabled={Boolean(editingRow)}
+        >
           <ToggleButton value="Grouping">Grouping</ToggleButton>
           <ToggleButton value="Total">Total</ToggleButton>
           <ToggleButton value="Net">Net</ToggleButton>
@@ -201,8 +213,8 @@ function AddRowDialog({ open, onClose, availableGroupings, earlierRows, onAdd })
       </DialogContent>
       <DialogActions>
         <Button onClick={onClose}>Cancel</Button>
-        <Button variant="contained" disabled={!canAdd} onClick={handleAdd}>
-          Add
+        <Button variant="contained" disabled={!canSubmit} onClick={handleSubmit}>
+          {editingRow ? 'Save' : 'Add'}
         </Button>
       </DialogActions>
     </Dialog>
@@ -218,7 +230,8 @@ export default function ReportLayout() {
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState(null);
   const [error, setError] = useState(null);
-  const [addDialogOpen, setAddDialogOpen] = useState(false);
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const [editingIndex, setEditingIndex] = useState(null);
 
   const refresh = () => {
     if (!groupId) return;
@@ -281,6 +294,24 @@ export default function ReportLayout() {
     setRows((prev) => prev.map((r) => ({ ...r, isRevenueBase: r.tempId === tempId ? !r.isRevenueBase : false })));
   };
 
+  const openAddDialog = () => {
+    setEditingIndex(null);
+    setDialogOpen(true);
+  };
+
+  const openEditDialog = (index) => {
+    setEditingIndex(index);
+    setDialogOpen(true);
+  };
+
+  const handleDialogSubmit = (rowData) => {
+    if (editingIndex !== null) {
+      setRows((prev) => prev.map((r, i) => (i === editingIndex ? rowData : r)));
+    } else {
+      setRows((prev) => [...prev, rowData]);
+    }
+  };
+
   const handleSave = async () => {
     setSaving(true);
     setError(null);
@@ -295,6 +326,9 @@ export default function ReportLayout() {
       setSaving(false);
     }
   };
+
+  const editingRow = editingIndex !== null ? rows[editingIndex] : null;
+  const earlierRowsForDialog = editingIndex !== null ? rows.slice(0, editingIndex) : rows;
 
   return (
     <Box>
@@ -365,6 +399,11 @@ export default function ReportLayout() {
                   </TableCell>
                 )}
                 <TableCell align="right">
+                  {row.rowType !== 'Grouping' && (
+                    <IconButton size="small" onClick={() => openEditDialog(index)}>
+                      <EditIcon fontSize="small" />
+                    </IconButton>
+                  )}
                   <IconButton size="small" disabled={!canMoveUp(index)} onClick={() => moveRow(index, -1)}>
                     <ArrowUpwardIcon fontSize="small" />
                   </IconButton>
@@ -387,7 +426,7 @@ export default function ReportLayout() {
       </TableContainer>
 
       <Box sx={{ display: 'flex', gap: 2, mt: 2 }}>
-        <Button variant="outlined" onClick={() => setAddDialogOpen(true)}>
+        <Button variant="outlined" onClick={openAddDialog}>
           + Add Row
         </Button>
         <Button variant="contained" disabled={saving} onClick={handleSave}>
@@ -395,12 +434,13 @@ export default function ReportLayout() {
         </Button>
       </Box>
 
-      <AddRowDialog
-        open={addDialogOpen}
-        onClose={() => setAddDialogOpen(false)}
+      <RowDialog
+        open={dialogOpen}
+        onClose={() => setDialogOpen(false)}
         availableGroupings={availableGroupings}
-        earlierRows={rows}
-        onAdd={(row) => setRows((prev) => [...prev, row])}
+        earlierRows={earlierRowsForDialog}
+        editingRow={editingRow}
+        onSubmit={handleDialogSubmit}
       />
     </Box>
   );

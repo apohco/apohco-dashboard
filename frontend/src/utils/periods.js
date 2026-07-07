@@ -66,22 +66,6 @@ export function buildTtmPeriod(selectedMonth) {
   ];
 }
 
-// Two TTM periods for Compare mode: the selected month's trailing twelve
-// months, and the same twelve-month window one year earlier.
-export function buildCompareTtmPeriods(selectedMonth) {
-  const [current] = buildTtmPeriod(selectedMonth);
-  const priorStart = dayjs(current.startDate).subtract(1, 'year');
-  const priorEnd = dayjs(current.endDate).subtract(1, 'year');
-  return [
-    current,
-    {
-      label: `TTM ${priorEnd.format('MMM YYYY')} (PY)`,
-      startDate: priorStart.format('YYYY-MM-DD'),
-      endDate: priorEnd.format('YYYY-MM-DD'),
-    },
-  ];
-}
-
 // One period per month across an arbitrary ["YYYY-MM", "YYYY-MM"] range
 // (inclusive), for Multi-Month view — replaces the old assumption that
 // multi-month always starts at January of the selected month's year.
