@@ -32,7 +32,16 @@ import EditIcon from '@mui/icons-material/Edit';
 import StarIcon from '@mui/icons-material/Star';
 import StarBorderIcon from '@mui/icons-material/StarBorder';
 import { useAuth } from '../../context/AuthContext';
-import { listAccountGroupings, getReportLayout, saveReportLayout } from '../../api/settings';
+import {
+  listAccountGroupings,
+  getReportLayout,
+  saveReportLayout,
+  listReportViews,
+  createReportView,
+  renameReportView,
+  setDefaultReportView,
+  deleteReportView,
+} from '../../api/settings';
 
 const STATEMENTS = [
   { value: 'PL', label: 'Profit & Loss' },
@@ -221,9 +230,61 @@ function RowDialog({ open, onClose, availableGroupings, earlierRows, editingRow,
   );
 }
 
+function NewViewDialog({ open, onClose, views, onCreate }) {
+  const [viewName, setViewName] = useState('');
+  const [cloneFrom, setCloneFrom] = useState('');
+
+  useEffect(() => {
+    if (!open) return;
+    setViewName('');
+    setCloneFrom('');
+  }, [open]);
+
+  const handleCreate = () => {
+    if (!viewName.trim()) return;
+    onCreate(viewName.trim(), cloneFrom || null);
+    onClose();
+  };
+
+  return (
+    <Dialog open={open} onClose={onClose} maxWidth="xs" fullWidth>
+      <DialogTitle>New Report View</DialogTitle>
+      <DialogContent sx={{ display: 'flex', flexDirection: 'column', gap: 2, pt: 1 }}>
+        <TextField
+          size="small"
+          autoFocus
+          label="View name"
+          value={viewName}
+          onChange={(e) => setViewName(e.target.value)}
+        />
+        {views.length > 0 && (
+          <Select size="small" displayEmpty value={cloneFrom} onChange={(e) => setCloneFrom(e.target.value)}>
+            <MenuItem value="">
+              <em>Start blank</em>
+            </MenuItem>
+            {views.map((v) => (
+              <MenuItem key={v.reportViewId} value={v.reportViewId}>
+                Duplicate from &quot;{v.viewName}&quot;
+              </MenuItem>
+            ))}
+          </Select>
+        )}
+      </DialogContent>
+      <DialogActions>
+        <Button onClick={onClose}>Cancel</Button>
+        <Button variant="contained" disabled={!viewName.trim()} onClick={handleCreate}>
+          Create
+        </Button>
+      </DialogActions>
+    </Dialog>
+  );
+}
+
 export default function ReportLayout() {
   const { groupId } = useAuth();
   const [statement, setStatement] = useState('PL');
+  const [views, setViews] = useState([]);
+  const [reportViewId, setReportViewId] = useState('');
   const [rows, setRows] = useState([]);
   const [groupings, setGroupings] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -232,16 +293,37 @@ export default function ReportLayout() {
   const [error, setError] = useState(null);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editingIndex, setEditingIndex] = useState(null);
+  const [newViewDialogOpen, setNewViewDialogOpen] = useState(false);
 
-  const refresh = () => {
+  // Statement change: reload the view list from scratch and land on the
+  // default view (or none, if this statement has no views configured yet).
+  useEffect(() => {
     if (!groupId) return;
+    setError(null);
+    listReportViews(groupId, statement)
+      .then((list) => {
+        setViews(list);
+        setReportViewId(list.find((v) => v.isDefault)?.reportViewId || list[0]?.reportViewId || '');
+      })
+      .catch(setError);
+  }, [groupId, statement]);
+
+  useEffect(() => {
+    if (!groupId) return;
+    Promise.all(accountTypesFor(statement).map((t) => listAccountGroupings(groupId, t)))
+      .then((lists) => setGroupings(lists.flat()))
+      .catch(setError);
+  }, [groupId, statement]);
+
+  const refreshRows = () => {
+    if (!groupId || !reportViewId) {
+      setRows([]);
+      return;
+    }
     setLoading(true);
     setError(null);
-    Promise.all([
-      getReportLayout(groupId, statement),
-      Promise.all(accountTypesFor(statement).map((t) => listAccountGroupings(groupId, t))),
-    ])
-      .then(([layout, groupingLists]) => {
+    getReportLayout(groupId, statement, reportViewId)
+      .then((layout) => {
         setRows(
           (layout.rows || []).map((r) => ({
             tempId: r.rowId,
@@ -253,13 +335,21 @@ export default function ReportLayout() {
             componentTempIds: r.componentRowIds || [],
           }))
         );
-        setGroupings(groupingLists.flat());
       })
       .catch(setError)
       .finally(() => setLoading(false));
   };
 
-  useEffect(refresh, [groupId, statement]);
+  useEffect(refreshRows, [groupId, reportViewId]);
+
+  const refreshViewsList = (preferredId) => {
+    if (!groupId) return;
+    listReportViews(groupId, statement).then((list) => {
+      setViews(list);
+      const stillExists = preferredId && list.some((v) => v.reportViewId === preferredId);
+      setReportViewId(stillExists ? preferredId : list.find((v) => v.isDefault)?.reportViewId || list[0]?.reportViewId || '');
+    });
+  };
 
   const usedGroupingIds = new Set(rows.filter((r) => r.rowType === 'Grouping' && r.groupingId).map((r) => r.groupingId));
   const availableGroupings = groupings.filter((g) => !usedGroupingIds.has(g.groupingid));
@@ -317,9 +407,9 @@ export default function ReportLayout() {
     setError(null);
     setMessage(null);
     try {
-      await saveReportLayout(groupId, statement, rows);
+      await saveReportLayout(groupId, statement, reportViewId, rows);
       setMessage('Report Layout saved.');
-      refresh();
+      refreshRows();
     } catch (err) {
       setError(err);
     } finally {
@@ -327,8 +417,51 @@ export default function ReportLayout() {
     }
   };
 
+  const handleCreateView = async (viewName, cloneFromReportViewId) => {
+    setError(null);
+    try {
+      const created = await createReportView(groupId, statement, viewName, cloneFromReportViewId);
+      refreshViewsList(created.reportViewId);
+    } catch (err) {
+      setError(err);
+    }
+  };
+
+  const handleRenameView = async () => {
+    const current = views.find((v) => v.reportViewId === reportViewId);
+    const name = window.prompt('Rename this Report View:', current?.viewName || '');
+    if (!name || !name.trim()) return;
+    try {
+      await renameReportView(reportViewId, groupId, name.trim());
+      refreshViewsList(reportViewId);
+    } catch (err) {
+      setError(err);
+    }
+  };
+
+  const handleSetDefaultView = async () => {
+    try {
+      await setDefaultReportView(reportViewId, groupId);
+      refreshViewsList(reportViewId);
+    } catch (err) {
+      setError(err);
+    }
+  };
+
+  const handleDeleteView = async () => {
+    const current = views.find((v) => v.reportViewId === reportViewId);
+    if (!window.confirm(`Delete the "${current?.viewName}" Report View? This cannot be undone.`)) return;
+    try {
+      await deleteReportView(reportViewId, groupId);
+      refreshViewsList(null);
+    } catch (err) {
+      setError(err);
+    }
+  };
+
   const editingRow = editingIndex !== null ? rows[editingIndex] : null;
   const earlierRowsForDialog = editingIndex !== null ? rows.slice(0, editingIndex) : rows;
+  const currentView = views.find((v) => v.reportViewId === reportViewId);
 
   return (
     <Box>
@@ -338,6 +471,7 @@ export default function ReportLayout() {
       <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
         Set the order and subtotals for each financial statement. Build rows top to bottom: a Grouping sums its
         assigned accounts, a Total sums one or more earlier rows, and a Net subtracts one earlier row from another.
+        Each statement can have multiple named Report Views — pick which one to view on the report page.
       </Typography>
 
       <ToggleButtonGroup
@@ -354,85 +488,130 @@ export default function ReportLayout() {
         ))}
       </ToggleButtonGroup>
 
+      <Paper variant="outlined" sx={{ p: 2, mb: 2, display: 'flex', alignItems: 'center', gap: 2, flexWrap: 'wrap' }}>
+        <Typography variant="body2" color="text.secondary" sx={{ fontWeight: 600 }}>
+          Report View:
+        </Typography>
+        <Select size="small" displayEmpty value={reportViewId} onChange={(e) => setReportViewId(e.target.value)}>
+          {views.length === 0 && (
+            <MenuItem value="" disabled>
+              No views yet
+            </MenuItem>
+          )}
+          {views.map((v) => (
+            <MenuItem key={v.reportViewId} value={v.reportViewId}>
+              {v.viewName}
+              {v.isDefault ? ' (default)' : ''}
+            </MenuItem>
+          ))}
+        </Select>
+        <Button size="small" variant="outlined" onClick={() => setNewViewDialogOpen(true)}>
+          + New View
+        </Button>
+        {currentView && (
+          <>
+            <Button size="small" onClick={handleRenameView}>
+              Rename
+            </Button>
+            <Button size="small" disabled={currentView.isDefault} onClick={handleSetDefaultView}>
+              Set as Default
+            </Button>
+            <Button size="small" color="error" onClick={handleDeleteView}>
+              Delete
+            </Button>
+          </>
+        )}
+      </Paper>
+
       {message && <Alert severity="success" sx={{ mb: 2 }}>{message}</Alert>}
       {error && <Alert severity="error" sx={{ mb: 2 }}>{error.response?.data?.message || error.message}</Alert>}
 
-      <TableContainer component={Paper} variant="outlined">
-        <Table size="small">
-          <TableHead>
-            <TableRow>
-              <TableCell>Type</TableCell>
-              <TableCell>Label</TableCell>
-              <TableCell>Includes</TableCell>
-              {statement === 'PL' && <TableCell>Revenue base</TableCell>}
-              <TableCell align="right">Order</TableCell>
-            </TableRow>
-          </TableHead>
-          <TableBody>
-            {rows.map((row, index) => (
-              <TableRow key={row.tempId}>
-                <TableCell>
-                  <Chip size="small" label={row.rowType} />
-                </TableCell>
-                <TableCell>
-                  {row.label}
-                  {row.isSystemRow ? ' (system)' : ''}
-                </TableCell>
-                <TableCell>
-                  {row.componentTempIds?.length
-                    ? row.componentTempIds
-                        .map((id) => rows.find((r) => r.tempId === id)?.label || '?')
-                        .join(row.rowType === 'Net' ? ' − ' : ' + ')
-                    : '—'}
-                </TableCell>
-                {statement === 'PL' && (
-                  <TableCell>
-                    {row.rowType === 'Grouping' && (
-                      <IconButton size="small" onClick={() => toggleRevenueBase(row.tempId)}>
-                        {row.isRevenueBase ? (
-                          <StarIcon fontSize="small" color="warning" />
-                        ) : (
-                          <StarBorderIcon fontSize="small" />
-                        )}
-                      </IconButton>
-                    )}
-                  </TableCell>
-                )}
-                <TableCell align="right">
-                  {row.rowType !== 'Grouping' && (
-                    <IconButton size="small" onClick={() => openEditDialog(index)}>
-                      <EditIcon fontSize="small" />
-                    </IconButton>
-                  )}
-                  <IconButton size="small" disabled={!canMoveUp(index)} onClick={() => moveRow(index, -1)}>
-                    <ArrowUpwardIcon fontSize="small" />
-                  </IconButton>
-                  <IconButton size="small" disabled={!canMoveDown(index)} onClick={() => moveRow(index, 1)}>
-                    <ArrowDownwardIcon fontSize="small" />
-                  </IconButton>
-                  <IconButton size="small" disabled={row.isSystemRow} onClick={() => deleteRow(index)}>
-                    <DeleteIcon fontSize="small" />
-                  </IconButton>
-                </TableCell>
-              </TableRow>
-            ))}
-            {rows.length === 0 && !loading && (
-              <TableRow>
-                <TableCell colSpan={5}>No rows configured yet — add one below.</TableCell>
-              </TableRow>
-            )}
-          </TableBody>
-        </Table>
-      </TableContainer>
+      {!reportViewId && (
+        <Alert severity="info" sx={{ mb: 2 }}>
+          No Report View exists yet for this statement — create one above to get started.
+        </Alert>
+      )}
 
-      <Box sx={{ display: 'flex', gap: 2, mt: 2 }}>
-        <Button variant="outlined" onClick={openAddDialog}>
-          + Add Row
-        </Button>
-        <Button variant="contained" disabled={saving} onClick={handleSave}>
-          {saving ? 'Saving...' : 'Save'}
-        </Button>
-      </Box>
+      {reportViewId && (
+        <>
+          <TableContainer component={Paper} variant="outlined">
+            <Table size="small">
+              <TableHead>
+                <TableRow>
+                  <TableCell>Type</TableCell>
+                  <TableCell>Label</TableCell>
+                  <TableCell>Includes</TableCell>
+                  {statement === 'PL' && <TableCell>Revenue base</TableCell>}
+                  <TableCell align="right">Order</TableCell>
+                </TableRow>
+              </TableHead>
+              <TableBody>
+                {rows.map((row, index) => (
+                  <TableRow key={row.tempId}>
+                    <TableCell>
+                      <Chip size="small" label={row.rowType} />
+                    </TableCell>
+                    <TableCell>
+                      {row.label}
+                      {row.isSystemRow ? ' (system)' : ''}
+                    </TableCell>
+                    <TableCell>
+                      {row.componentTempIds?.length
+                        ? row.componentTempIds
+                            .map((id) => rows.find((r) => r.tempId === id)?.label || '?')
+                            .join(row.rowType === 'Net' ? ' − ' : ' + ')
+                        : '—'}
+                    </TableCell>
+                    {statement === 'PL' && (
+                      <TableCell>
+                        {row.rowType === 'Grouping' && (
+                          <IconButton size="small" onClick={() => toggleRevenueBase(row.tempId)}>
+                            {row.isRevenueBase ? (
+                              <StarIcon fontSize="small" color="warning" />
+                            ) : (
+                              <StarBorderIcon fontSize="small" />
+                            )}
+                          </IconButton>
+                        )}
+                      </TableCell>
+                    )}
+                    <TableCell align="right">
+                      {row.rowType !== 'Grouping' && (
+                        <IconButton size="small" onClick={() => openEditDialog(index)}>
+                          <EditIcon fontSize="small" />
+                        </IconButton>
+                      )}
+                      <IconButton size="small" disabled={!canMoveUp(index)} onClick={() => moveRow(index, -1)}>
+                        <ArrowUpwardIcon fontSize="small" />
+                      </IconButton>
+                      <IconButton size="small" disabled={!canMoveDown(index)} onClick={() => moveRow(index, 1)}>
+                        <ArrowDownwardIcon fontSize="small" />
+                      </IconButton>
+                      <IconButton size="small" disabled={row.isSystemRow} onClick={() => deleteRow(index)}>
+                        <DeleteIcon fontSize="small" />
+                      </IconButton>
+                    </TableCell>
+                  </TableRow>
+                ))}
+                {rows.length === 0 && !loading && (
+                  <TableRow>
+                    <TableCell colSpan={5}>No rows configured yet — add one below.</TableCell>
+                  </TableRow>
+                )}
+              </TableBody>
+            </Table>
+          </TableContainer>
+
+          <Box sx={{ display: 'flex', gap: 2, mt: 2 }}>
+            <Button variant="outlined" onClick={openAddDialog}>
+              + Add Row
+            </Button>
+            <Button variant="contained" disabled={saving} onClick={handleSave}>
+              {saving ? 'Saving...' : 'Save'}
+            </Button>
+          </Box>
+        </>
+      )}
 
       <RowDialog
         open={dialogOpen}
@@ -441,6 +620,13 @@ export default function ReportLayout() {
         earlierRows={earlierRowsForDialog}
         editingRow={editingRow}
         onSubmit={handleDialogSubmit}
+      />
+
+      <NewViewDialog
+        open={newViewDialogOpen}
+        onClose={() => setNewViewDialogOpen(false)}
+        views={views}
+        onCreate={handleCreateView}
       />
     </Box>
   );

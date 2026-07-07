@@ -389,6 +389,27 @@ Resources:
             Path: /api/settings/report-layout
             Method: any
 
+  ManageReportViewsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: manageReportViews
+      Handler: src/functions/settings/manageReportViews/index.handler
+      Policies: *lambdaPolicies
+      Environment: *cognitoAuthEnv
+      Events:
+        Collection:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/settings/report-views
+            Method: any
+        Item:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/settings/report-views/{reportViewId}
+            Method: any
+
   ManageQBOsFunction:
     Type: AWS::Serverless::Function
     Properties:

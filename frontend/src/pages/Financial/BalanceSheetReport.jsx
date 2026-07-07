@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import dayjs from 'dayjs';
-import { Box, Typography, TextField, CircularProgress, Alert } from '@mui/material';
+import { Box, Typography, TextField, Select, MenuItem, CircularProgress, Alert } from '@mui/material';
 import ReportToolbar from '../../components/reports/ReportToolbar';
 import ReportTable from '../../components/reports/ReportTable';
 import ReportNotConfigured from '../../components/reports/ReportNotConfigured';
@@ -9,6 +9,7 @@ import { useAuth } from '../../context/AuthContext';
 import useEntityOptions, { parseEntityValue } from '../../hooks/useEntityOptions';
 import { buildAsOfPeriods } from '../../utils/periods';
 import { getBalanceSheet } from '../../api/reports';
+import { listReportViews } from '../../api/settings';
 
 export default function BalanceSheetReport() {
   const { groupId } = useAuth();
@@ -19,6 +20,9 @@ export default function BalanceSheetReport() {
   const [detailLevel, setDetailLevel] = useState('summary');
   const [selectedMonth, setSelectedMonth] = useState(dayjs().format('YYYY-MM'));
 
+  const [reportViews, setReportViews] = useState([]);
+  const [reportViewId, setReportViewId] = useState('');
+
   const [report, setReport] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -26,15 +30,27 @@ export default function BalanceSheetReport() {
   const periods = useMemo(() => buildAsOfPeriods(viewMode, selectedMonth), [viewMode, selectedMonth]);
 
   useEffect(() => {
+    if (!groupId) return;
+    listReportViews(groupId, 'BalanceSheet').then((list) => {
+      setReportViews(list);
+      setReportViewId((prev) =>
+        prev && list.some((v) => v.reportViewId === prev)
+          ? prev
+          : list.find((v) => v.isDefault)?.reportViewId || list[0]?.reportViewId || ''
+      );
+    });
+  }, [groupId]);
+
+  useEffect(() => {
     if (!groupId || !entity) return;
     const { entityType, entityId } = parseEntityValue(entity);
     setLoading(true);
     setError(null);
-    getBalanceSheet({ groupId, entityType, entityId, periods, detailLevel })
+    getBalanceSheet({ groupId, entityType, entityId, periods, detailLevel, reportViewId })
       .then(setReport)
       .catch(setError)
       .finally(() => setLoading(false));
-  }, [groupId, entity, periods, detailLevel]);
+  }, [groupId, entity, periods, detailLevel, reportViewId]);
 
   return (
     <Box>
@@ -51,14 +67,25 @@ export default function BalanceSheetReport() {
         onDetailLevelChange={setDetailLevel}
         lastSynced={report?.lastSyncedAt ? dayjs(report.lastSyncedAt).format('MMM D, YYYY h:mm A') : null}
         extraControls={
-          <TextField
-            size="small"
-            type="month"
-            label="As of Month"
-            InputLabelProps={{ shrink: true }}
-            value={selectedMonth}
-            onChange={(e) => setSelectedMonth(e.target.value)}
-          />
+          <>
+            {reportViews.length > 1 && (
+              <Select size="small" value={reportViewId} onChange={(e) => setReportViewId(e.target.value)}>
+                {reportViews.map((v) => (
+                  <MenuItem key={v.reportViewId} value={v.reportViewId}>
+                    {v.viewName}
+                  </MenuItem>
+                ))}
+              </Select>
+            )}
+            <TextField
+              size="small"
+              type="month"
+              label="As of Month"
+              InputLabelProps={{ shrink: true }}
+              value={selectedMonth}
+              onChange={(e) => setSelectedMonth(e.target.value)}
+            />
+          </>
         }
       />
 

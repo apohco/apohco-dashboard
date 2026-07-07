@@ -32,13 +32,20 @@ async function resolveEntity(groupId, entityType, entityId) {
     }
 
     const { rows } = await query(
-      `SELECT cgq.QBOId, cgq.QBOClassId
+      `SELECT cgq.QBOId, cgq.QBOClassId,
+              ARRAY_REMOVE(ARRAY_AGG(cge.AccountCode), NULL) AS excludedaccountcodes
        FROM ConsolidationGroupQBOs cgq
        JOIN QBOs q ON q.QBOId = cgq.QBOId
-       WHERE cgq.ConsolidationGroupId = $1 AND q.GroupId = $2`,
+       LEFT JOIN ConsolidationGroupQBOExclusions cge ON cge.ConsolidationGroupQBOId = cgq.Id
+       WHERE cgq.ConsolidationGroupId = $1 AND q.GroupId = $2
+       GROUP BY cgq.QBOId, cgq.QBOClassId`,
       [entityId, groupId]
     );
-    return rows.map((r) => ({ qboId: r.qboid, qboClassId: r.qboclassid }));
+    return rows.map((r) => ({
+      qboId: r.qboid,
+      qboClassId: r.qboclassid,
+      excludedAccountCodes: r.excludedaccountcodes || [],
+    }));
   }
 
   const err = new Error("entityType must be 'qbo' or 'consolidationGroup'");
@@ -49,22 +56,34 @@ async function resolveEntity(groupId, entityType, entityId) {
 // Builds a parenthesized SQL OR-clause matching any of the resolved
 // entities against a RawTransactions-aliased table, starting bound
 // parameters at $<startIndex>. Returns the fragment, its params, and the
-// next free parameter index so callers can keep building the query.
+// next free parameter index so callers can keep building the query. An
+// entity carrying `excludedAccountCodes` (set only for Consolidation Group
+// members -- see resolveEntity) gets an extra AND NOT clause scoped to just
+// that entity, so excluding an account from one QBO within one
+// Consolidation Group never affects that QBO's standalone report or its
+// membership in a different Consolidation Group.
 function buildEntityWhereClause(entities, startIndex, alias = 'rt') {
   const clauses = [];
   const params = [];
   let idx = startIndex;
 
   for (const entity of entities) {
+    const parts = [];
     if (entity.qboClassId === null) {
-      clauses.push(`(${alias}.QBOId = $${idx})`);
+      parts.push(`${alias}.QBOId = $${idx}`);
       params.push(entity.qboId);
       idx += 1;
     } else {
-      clauses.push(`(${alias}.QBOId = $${idx} AND ${alias}.QBOClassId = $${idx + 1})`);
+      parts.push(`${alias}.QBOId = $${idx} AND ${alias}.QBOClassId = $${idx + 1}`);
       params.push(entity.qboId, entity.qboClassId);
       idx += 2;
     }
+    if (entity.excludedAccountCodes?.length) {
+      parts.push(`${alias}.AccountCode <> ALL($${idx}::text[])`);
+      params.push(entity.excludedAccountCodes);
+      idx += 1;
+    }
+    clauses.push(`(${parts.join(' AND ')})`);
   }
 
   return { sql: `(${clauses.join(' OR ')})`, params, nextIndex: idx };
@@ -144,19 +163,47 @@ function displayAmount(classification, rawSum) {
   return creditNormal.includes(classification) ? -amount : amount;
 }
 
-// Fetches a Group's configured Report Layout for one Statement
-// (PL/BalanceSheet/CashFlow) as an ordered list of rows, each carrying its
-// Total/Net component references (also ordered — for a Net row, the first
-// component is the positive operand, the second is subtracted). Returns
-// configured: false when nothing has been set up yet, so callers can show
-// an empty/prompt state instead of guessing a fallback structure.
-async function getReportLayout(groupId, statement) {
+// Resolves which Report View a request should use: the explicitly
+// requested `reportViewId` (validated against groupId+statement so a
+// caller can't cross into another Group's or Statement's view), or -- when
+// omitted -- the statement's IsDefault view. Returns null if no view
+// exists yet (unconfigured), letting callers show an empty/prompt state.
+async function resolveReportView(groupId, statement, reportViewId) {
+  if (reportViewId) {
+    const { rows } = await query(
+      `SELECT ReportViewId FROM ReportViews WHERE ReportViewId = $1 AND GroupId = $2 AND Statement = $3`,
+      [reportViewId, groupId, statement]
+    );
+    if (!rows.length) {
+      const err = new Error('Report View not found for this Group/Statement');
+      err.statusCode = 404;
+      throw err;
+    }
+    return reportViewId;
+  }
+
+  const { rows } = await query(
+    `SELECT ReportViewId FROM ReportViews WHERE GroupId = $1 AND Statement = $2 AND IsDefault = true`,
+    [groupId, statement]
+  );
+  return rows[0]?.reportviewid || null;
+}
+
+// Fetches one Report View's ordered rows, each carrying its Total/Net
+// component references (also ordered — for a Net row, the first component
+// is the positive operand, the second is subtracted). Returns
+// configured: false when reportViewId is null (nothing set up yet) or has
+// no rows, so callers can show an empty/prompt state instead of guessing a
+// fallback structure.
+async function getReportLayout(reportViewId) {
+  if (!reportViewId) return { configured: false, rows: [] };
+
   const { rows } = await query(
     `SELECT RowId, RowType, Label, GroupingId, IsSystemRow, IsRevenueBase, SortOrder
      FROM ReportLayoutRows
-     WHERE GroupId = $1 AND Statement = $2
+     WHERE ReportViewId = $1
      ORDER BY SortOrder`,
-    [groupId, statement]
+    [reportViewId]
   );
   if (!rows.length) return { configured: false, rows: [] };
 
@@ -265,6 +312,7 @@ module.exports = {
   queryPeriodActivity,
   queryCumulativeBalance,
   displayAmount,
+  resolveReportView,
   getReportLayout,
   evaluateReportLayout,
 };

@@ -2,7 +2,7 @@ const { requireAuth } = require('../../../shared/verifyToken');
 const { requireRole, requireGroupAccess } = require('../../../shared/authorize');
 const { query, withTransaction } = require('../../../shared/db');
 const { json, withErrorHandling } = require('../../../shared/response');
-const { getReportLayout } = require('../../../shared/reportHelpers');
+const { getReportLayout, resolveReportView } = require('../../../shared/reportHelpers');
 
 const STATEMENTS = ['PL', 'BalanceSheet', 'CashFlow'];
 const ROW_TYPES = ['Grouping', 'Total', 'Net'];
@@ -99,40 +99,44 @@ async function validateRows(groupId, statement, rows) {
 }
 
 async function handleGet(claims, params) {
-  const { groupId, statement } = params;
+  const { groupId, statement, reportViewId } = params;
   if (!groupId || !STATEMENTS.includes(statement)) {
     throw badRequest('groupId and a valid statement are required');
   }
   requireGroupAccess(claims, groupId);
-  const result = await getReportLayout(groupId, statement);
+  const resolvedViewId = await resolveReportView(groupId, statement, reportViewId || null);
+  const result = await getReportLayout(resolvedViewId);
   return json(200, result);
 }
 
 async function handlePut(claims, body) {
-  const { groupId, statement, rows } = body;
-  if (!groupId || !STATEMENTS.includes(statement)) {
-    throw badRequest('groupId and a valid statement are required');
+  const { groupId, statement, reportViewId, rows } = body;
+  if (!groupId || !STATEMENTS.includes(statement) || !reportViewId) {
+    throw badRequest('groupId, a valid statement, and reportViewId are required');
   }
   requireRole(claims, ['Owner', 'Manager']);
   requireGroupAccess(claims, groupId);
 
+  // Confirms reportViewId actually belongs to this Group+Statement before
+  // any write -- prevents a crafted request from overwriting another
+  // Group's or Statement's view.
+  await resolveReportView(groupId, statement, reportViewId);
+
   await validateRows(groupId, statement, rows);
 
   await withTransaction(async (client) => {
-    await client.query(`DELETE FROM ReportLayoutRows WHERE GroupId = $1 AND Statement = $2`, [
-      groupId,
-      statement,
-    ]);
+    await client.query(`DELETE FROM ReportLayoutRows WHERE ReportViewId = $1`, [reportViewId]);
 
     const tempIdToRowId = new Map();
     for (let i = 0; i < rows.length; i += 1) {
       const row = rows[i];
       const { rows: inserted } = await client.query(
         `INSERT INTO ReportLayoutRows
-           (GroupId, Statement, RowType, Label, GroupingId, IsSystemRow, IsRevenueBase, SortOrder, UpdatedBy)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+           (ReportViewId, GroupId, Statement, RowType, Label, GroupingId, IsSystemRow, IsRevenueBase, SortOrder, UpdatedBy)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
          RETURNING RowId`,
         [
+          reportViewId,
           groupId,
           statement,
           row.rowType,
@@ -160,12 +164,12 @@ async function handlePut(claims, body) {
     }
   });
 
-  const result = await getReportLayout(groupId, statement);
+  const result = await getReportLayout(reportViewId);
   return json(200, result);
 }
 
-// /api/settings/report-layout  GET  ?groupId=&statement=  -- fetch one Statement's layout
-// /api/settings/report-layout  PUT  {groupId, statement, rows}  -- replace the whole layout
+// /api/settings/report-layout  GET  ?groupId=&statement=&reportViewId=  -- fetch one Report View's rows (reportViewId optional, falls back to the statement's default view)
+// /api/settings/report-layout  PUT  {groupId, statement, reportViewId, rows}  -- replace one Report View's rows
 exports.handler = withErrorHandling(async (event) => {
   const claims = await requireAuth(event);
 

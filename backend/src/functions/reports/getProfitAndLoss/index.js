@@ -6,6 +6,7 @@ const {
   getLastSyncedAt,
   queryPeriodActivity,
   displayAmount,
+  resolveReportView,
   getReportLayout,
   evaluateReportLayout,
 } = require('../../../shared/reportHelpers');
@@ -46,13 +47,14 @@ function buildAmountsByGroupingId(periods, rowsByPeriodLabel) {
 }
 
 // POST /api/reports/profit-and-loss
-// Body: { groupId, entityType, entityId, periods: [{label, startDate, endDate}], detailLevel }
-// Row order/subtotals come entirely from this Group's configured PL Report
-// Layout (Settings > Report Layout) -- see reportHelpers.evaluateReportLayout.
-// Returns { configured: false } if no layout has been set up yet.
+// Body: { groupId, entityType, entityId, periods: [{label, startDate, endDate}], detailLevel, reportViewId? }
+// Row order/subtotals come from the requested Report View (Settings >
+// Report Layout) -- see reportHelpers.evaluateReportLayout. reportViewId
+// is optional; when omitted, resolves to the PL statement's default view.
+// Returns { configured: false } if no view/layout has been set up yet.
 exports.handler = withErrorHandling(async (event) => {
   const claims = await requireAuth(event);
-  const { groupId, entityType, entityId, periods, detailLevel = 'summary' } = JSON.parse(
+  const { groupId, entityType, entityId, periods, detailLevel = 'summary', reportViewId } = JSON.parse(
     event.body || '{}'
   );
 
@@ -66,7 +68,8 @@ exports.handler = withErrorHandling(async (event) => {
   const entities = await resolveEntity(groupId, entityType, entityId);
   const lastSyncedAt = await getLastSyncedAt(entities);
 
-  const layout = await getReportLayout(groupId, 'PL');
+  const resolvedViewId = await resolveReportView(groupId, 'PL', reportViewId);
+  const layout = await getReportLayout(resolvedViewId);
   if (!layout.configured) {
     return json(200, { periods, detailLevel, lastSyncedAt, configured: false });
   }

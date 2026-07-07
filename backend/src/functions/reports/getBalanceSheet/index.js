@@ -7,6 +7,7 @@ const {
   queryCumulativeBalance,
   queryPeriodActivity,
   displayAmount,
+  resolveReportView,
   getReportLayout,
   evaluateReportLayout,
 } = require('../../../shared/reportHelpers');
@@ -50,17 +51,18 @@ function fiscalYearStart(asOfDate) {
 }
 
 // POST /api/reports/balance-sheet
-// Body: { groupId, entityType, entityId, periods: [{label, asOfDate}], detailLevel }
+// Body: { groupId, entityType, entityId, periods: [{label, asOfDate}], detailLevel, reportViewId? }
 // Balances are cumulative-since-inception as of each period's asOfDate.
-// Row order/subtotals come from this Group's configured BalanceSheet
-// Report Layout. That layout's one system row ("Net Income (current
-// year)") is fed the same YTD P&L computation this report always used --
-// APOHCO doesn't book a year-end closing entry into retained earnings
-// mid-year, so this mirrors how QBO itself presents an interim Balance
-// Sheet. Returns { configured: false } if no layout has been set up yet.
+// Row order/subtotals come from the requested Report View (reportViewId is
+// optional; omitted resolves to the BalanceSheet statement's default
+// view). That view's one system row ("Net Income (current year)") is fed
+// the same YTD P&L computation this report always used -- APOHCO doesn't
+// book a year-end closing entry into retained earnings mid-year, so this
+// mirrors how QBO itself presents an interim Balance Sheet. Returns
+// { configured: false } if no view/layout has been set up yet.
 exports.handler = withErrorHandling(async (event) => {
   const claims = await requireAuth(event);
-  const { groupId, entityType, entityId, periods, detailLevel = 'summary' } = JSON.parse(
+  const { groupId, entityType, entityId, periods, detailLevel = 'summary', reportViewId } = JSON.parse(
     event.body || '{}'
   );
 
@@ -74,7 +76,8 @@ exports.handler = withErrorHandling(async (event) => {
   const entities = await resolveEntity(groupId, entityType, entityId);
   const lastSyncedAt = await getLastSyncedAt(entities);
 
-  const layout = await getReportLayout(groupId, 'BalanceSheet');
+  const resolvedViewId = await resolveReportView(groupId, 'BalanceSheet', reportViewId);
+  const layout = await getReportLayout(resolvedViewId);
   if (!layout.configured) {
     return json(200, { periods, detailLevel, lastSyncedAt, configured: false });
   }

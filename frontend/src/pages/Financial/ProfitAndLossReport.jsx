@@ -20,6 +20,7 @@ import { useAuth } from '../../context/AuthContext';
 import useEntityOptions, { parseEntityValue } from '../../hooks/useEntityOptions';
 import { buildRangePeriods, buildTtmPeriod, buildCustomRangePeriods } from '../../utils/periods';
 import { getProfitAndLoss } from '../../api/reports';
+import { listReportViews } from '../../api/settings';
 
 export default function ProfitAndLossReport() {
   const { groupId } = useAuth();
@@ -43,9 +44,24 @@ export default function ProfitAndLossReport() {
     dayjs().subtract(1, 'year').format('YYYY-MM')
   );
 
+  const [reportViews, setReportViews] = useState([]);
+  const [reportViewId, setReportViewId] = useState('');
+
   const [report, setReport] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+
+  useEffect(() => {
+    if (!groupId) return;
+    listReportViews(groupId, 'PL').then((list) => {
+      setReportViews(list);
+      setReportViewId((prev) =>
+        prev && list.some((v) => v.reportViewId === prev)
+          ? prev
+          : list.find((v) => v.isDefault)?.reportViewId || list[0]?.reportViewId || ''
+      );
+    });
+  }, [groupId]);
 
   const periods = useMemo(() => {
     if (viewMode === 'multi') return buildCustomRangePeriods(fromMonth, toMonth);
@@ -68,8 +84,15 @@ export default function ProfitAndLossReport() {
     if (viewMode === 'compare') {
       const { entityType: cEntityType, entityId: cEntityId } = parseEntityValue(compareEntity || entity);
       Promise.all([
-        getProfitAndLoss({ groupId, entityType, entityId, periods: [periods[0]], detailLevel }),
-        getProfitAndLoss({ groupId, entityType: cEntityType, entityId: cEntityId, periods: [periods[1]], detailLevel }),
+        getProfitAndLoss({ groupId, entityType, entityId, periods: [periods[0]], detailLevel, reportViewId }),
+        getProfitAndLoss({
+          groupId,
+          entityType: cEntityType,
+          entityId: cEntityId,
+          periods: [periods[1]],
+          detailLevel,
+          reportViewId,
+        }),
       ])
         .then(([primaryReport, compareReport]) => {
           if (!primaryReport.configured) {
@@ -88,11 +111,11 @@ export default function ProfitAndLossReport() {
       return;
     }
 
-    getProfitAndLoss({ groupId, entityType, entityId, periods, detailLevel })
+    getProfitAndLoss({ groupId, entityType, entityId, periods, detailLevel, reportViewId })
       .then(setReport)
       .catch(setError)
       .finally(() => setLoading(false));
-  }, [groupId, entity, periods, detailLevel, viewMode, compareEntity]);
+  }, [groupId, entity, periods, detailLevel, viewMode, compareEntity, reportViewId]);
 
   const compareEntityLabel = entityOptions.find((o) => o.id === entity)?.label || 'same entity';
 
@@ -112,6 +135,15 @@ export default function ProfitAndLossReport() {
         lastSynced={report?.lastSyncedAt ? dayjs(report.lastSyncedAt).format('MMM D, YYYY h:mm A') : null}
         extraControls={
           <>
+            {reportViews.length > 1 && (
+              <Select size="small" value={reportViewId} onChange={(e) => setReportViewId(e.target.value)}>
+                {reportViews.map((v) => (
+                  <MenuItem key={v.reportViewId} value={v.reportViewId}>
+                    {v.viewName}
+                  </MenuItem>
+                ))}
+              </Select>
+            )}
             {viewMode !== 'multi' && (
               <ToggleButtonGroup
                 size="small"

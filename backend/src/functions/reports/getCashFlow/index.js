@@ -7,6 +7,7 @@ const {
   queryPeriodActivity,
   queryCumulativeBalance,
   displayAmount,
+  resolveReportView,
   getReportLayout,
   evaluateReportLayout,
 } = require('../../../shared/reportHelpers');
@@ -28,20 +29,21 @@ function sumByGroupingId(rows, classification) {
 }
 
 // POST /api/reports/cash-flow
-// Body: { groupId, entityType, entityId, periods: [{label, startDate, endDate}], detailLevel }
-// Row order/subtotals come entirely from this Group's configured CashFlow
-// Report Layout (Settings > Report Layout). Grouping rows may reference
-// either PL Groupings (whose contribution is this period's P&L activity)
-// or BalanceSheet Groupings (whose contribution is the period-over-period
+// Body: { groupId, entityType, entityId, periods: [{label, startDate, endDate}], detailLevel, reportViewId? }
+// Row order/subtotals come from the requested Report View (Settings >
+// Report Layout); reportViewId is optional, omitted resolves to the
+// CashFlow statement's default view. Grouping rows may reference either PL
+// Groupings (whose contribution is this period's P&L activity) or
+// BalanceSheet Groupings (whose contribution is the period-over-period
 // change in balance -- an asset increase uses cash, a liability/equity
 // increase provides cash); this is a simplified direct mapping, not full
 // indirect-method GAAP reconciliation. Category rollups like "Cash from
-// Operations" are just ordinary user-labeled Total rows in that layout, not
-// a separate mechanism. Returns { configured: false } if no layout has been
-// set up yet.
+// Operations" are just ordinary user-labeled Total rows in that view, not
+// a separate mechanism. Returns { configured: false } if no view/layout
+// has been set up yet.
 exports.handler = withErrorHandling(async (event) => {
   const claims = await requireAuth(event);
-  const { groupId, entityType, entityId, periods, detailLevel = 'summary' } = JSON.parse(
+  const { groupId, entityType, entityId, periods, detailLevel = 'summary', reportViewId } = JSON.parse(
     event.body || '{}'
   );
 
@@ -55,7 +57,8 @@ exports.handler = withErrorHandling(async (event) => {
   const entities = await resolveEntity(groupId, entityType, entityId);
   const lastSyncedAt = await getLastSyncedAt(entities);
 
-  const layout = await getReportLayout(groupId, 'CashFlow');
+  const resolvedViewId = await resolveReportView(groupId, 'CashFlow', reportViewId);
+  const layout = await getReportLayout(resolvedViewId);
   if (!layout.configured) {
     return json(200, { periods, detailLevel, lastSyncedAt, configured: false });
   }

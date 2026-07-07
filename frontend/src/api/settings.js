@@ -64,13 +64,35 @@ export const deleteConsolidationGroup = (consolidationGroupId, groupId) =>
     params: { groupId },
   });
 
-// Report Layout (per-Statement ordered Grouping/Total/Net rows — replaces
-// the old Cash Flow Mappings page, which is now just one Statement's layout)
-export const getReportLayout = (groupId, statement) =>
-  apiClient.get('/api/settings/report-layout', { params: { groupId, statement } }).then((r) => r.data);
+// Report Layout (one Report View's ordered Grouping/Total/Net rows —
+// replaces the old Cash Flow Mappings page, which is now just a CashFlow
+// Report View)
+export const getReportLayout = (groupId, statement, reportViewId) =>
+  apiClient
+    .get('/api/settings/report-layout', { params: { groupId, statement, reportViewId } })
+    .then((r) => r.data);
 
-export const saveReportLayout = (groupId, statement, rows) =>
-  apiClient.put('/api/settings/report-layout', { groupId, statement, rows }).then((r) => r.data);
+export const saveReportLayout = (groupId, statement, reportViewId, rows) =>
+  apiClient.put('/api/settings/report-layout', { groupId, statement, reportViewId, rows }).then((r) => r.data);
+
+// Report Views (multiple named layouts per Group+Statement, e.g. two
+// different P&L views to switch between)
+export const listReportViews = (groupId, statement) =>
+  apiClient.get('/api/settings/report-views', { params: { groupId, statement } }).then((r) => r.data);
+
+export const createReportView = (groupId, statement, viewName, cloneFromReportViewId) =>
+  apiClient
+    .post('/api/settings/report-views', { groupId, statement, viewName, cloneFromReportViewId })
+    .then((r) => r.data);
+
+export const renameReportView = (reportViewId, groupId, viewName) =>
+  apiClient.put(`/api/settings/report-views/${reportViewId}`, { groupId, viewName }).then((r) => r.data);
+
+export const setDefaultReportView = (reportViewId, groupId) =>
+  apiClient.put(`/api/settings/report-views/${reportViewId}`, { groupId, setDefault: true }).then((r) => r.data);
+
+export const deleteReportView = (reportViewId, groupId) =>
+  apiClient.delete(`/api/settings/report-views/${reportViewId}`, { params: { groupId } });
 
 // QBOs
 export const listQBOs = (groupId) =>

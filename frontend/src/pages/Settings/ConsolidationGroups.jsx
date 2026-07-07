@@ -18,6 +18,7 @@ import {
   Checkbox,
   Chip,
   Alert,
+  CircularProgress,
 } from '@mui/material';
 import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline';
 import EditOutlinedIcon from '@mui/icons-material/EditOutlined';
@@ -28,24 +29,85 @@ import {
   createConsolidationGroup,
   updateConsolidationGroup,
   deleteConsolidationGroup,
+  listChartOfAccounts,
 } from '../../api/settings';
 
 function membershipKey(qboId, qboClassId) {
   return `${qboId}::${qboClassId || 'whole'}`;
 }
 
+// Lazily loads and shows a checklist of a QBO's Chart of Accounts so the
+// user can exclude specific accounts from this membership's contribution
+// to the Consolidation Group -- e.g. eliminating both sides of an
+// intercompany Management Fee. Collapsed by default since most QBOs won't
+// need any exclusions.
+function ExclusionPicker({ groupId, qboId, expanded, onToggleExpand, excluded, onToggleAccount }) {
+  const [accounts, setAccounts] = useState(null);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (!expanded || accounts !== null) return;
+    setLoading(true);
+    listChartOfAccounts(groupId, qboId)
+      .then(setAccounts)
+      .finally(() => setLoading(false));
+  }, [expanded, groupId, qboId, accounts]);
+
+  return (
+    <Box sx={{ pl: 4 }}>
+      <Button size="small" onClick={onToggleExpand} sx={{ textTransform: 'none' }}>
+        {expanded ? 'Hide account exclusions' : `Exclude specific accounts${excluded.size ? ` (${excluded.size})` : ''}`}
+      </Button>
+      {expanded && (
+        <Box sx={{ maxHeight: 220, overflowY: 'auto', border: '1px solid', borderColor: 'divider', borderRadius: 1, p: 1, mt: 0.5 }}>
+          {loading && <CircularProgress size={20} />}
+          {!loading && accounts?.length === 0 && (
+            <Typography variant="body2" color="text.secondary">
+              No accounts found for this QBO yet.
+            </Typography>
+          )}
+          {!loading &&
+            accounts?.map((a) => (
+              <FormControlLabel
+                key={a.mappingid}
+                control={
+                  <Checkbox
+                    size="small"
+                    checked={excluded.has(a.accountcode)}
+                    onChange={() => onToggleAccount(a.accountcode)}
+                  />
+                }
+                label={`${a.accountcode} ${a.accountname}`}
+                sx={{ display: 'block' }}
+              />
+            ))}
+        </Box>
+      )}
+    </Box>
+  );
+}
+
 function ConsolidationGroupDialog({ open, onClose, onSaved, groupId, qbos, editing }) {
   const [name, setName] = useState('');
   const [selected, setSelected] = useState(new Set());
+  const [excludedByKey, setExcludedByKey] = useState({});
+  const [expandedKeys, setExpandedKeys] = useState(new Set());
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
 
   useEffect(() => {
     if (!open) return;
     setName(editing?.consolidationgroupname || '');
-    setSelected(
-      new Set((editing?.qbos || []).map((m) => membershipKey(m.qboid, m.qboclassid)))
+    setSelected(new Set((editing?.qbos || []).map((m) => membershipKey(m.qboid, m.qboclassid))));
+    setExcludedByKey(
+      Object.fromEntries(
+        (editing?.qbos || []).map((m) => [
+          membershipKey(m.qboid, m.qboclassid),
+          new Set(m.excludedaccountcodes || []),
+        ])
+      )
     );
+    setExpandedKeys(new Set());
     setError(null);
   }, [open, editing]);
 
@@ -58,12 +120,34 @@ function ConsolidationGroupDialog({ open, onClose, onSaved, groupId, qbos, editi
     });
   };
 
+  const toggleExpand = (key) => {
+    setExpandedKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
+
+  const toggleExcludedAccount = (key, accountCode) => {
+    setExcludedByKey((prev) => {
+      const current = new Set(prev[key] || []);
+      if (current.has(accountCode)) current.delete(accountCode);
+      else current.add(accountCode);
+      return { ...prev, [key]: current };
+    });
+  };
+
   const handleSave = async () => {
     setSaving(true);
     setError(null);
     const membershipQbos = [...selected].map((key) => {
       const [qboId, classPart] = key.split('::');
-      return { qboId, qboClassId: classPart === 'whole' ? null : classPart };
+      return {
+        qboId,
+        qboClassId: classPart === 'whole' ? null : classPart,
+        excludedAccountCodes: [...(excludedByKey[key] || [])],
+      };
     });
 
     try {
@@ -99,32 +183,48 @@ function ConsolidationGroupDialog({ open, onClose, onSaved, groupId, qbos, editi
           Include:
         </Typography>
         <FormGroup>
-          {qbos.map((q) => (
-            <Box key={q.qboid} sx={{ mb: 1 }}>
-              <FormControlLabel
-                control={
-                  <Checkbox
-                    checked={selected.has(membershipKey(q.qboid, null))}
-                    onChange={() => toggle(membershipKey(q.qboid, null))}
+          {qbos.map((q) => {
+            const wholeKey = membershipKey(q.qboid, null);
+            return (
+              <Box key={q.qboid} sx={{ mb: 1 }}>
+                <FormControlLabel
+                  control={<Checkbox checked={selected.has(wholeKey)} onChange={() => toggle(wholeKey)} />}
+                  label={`${q.qboname} (whole QBO)`}
+                />
+                {selected.has(wholeKey) && (
+                  <ExclusionPicker
+                    groupId={groupId}
+                    qboId={q.qboid}
+                    expanded={expandedKeys.has(wholeKey)}
+                    onToggleExpand={() => toggleExpand(wholeKey)}
+                    excluded={excludedByKey[wholeKey] || new Set()}
+                    onToggleAccount={(code) => toggleExcludedAccount(wholeKey, code)}
                   />
-                }
-                label={`${q.qboname} (whole QBO)`}
-              />
-              {q.classes?.map((c) => (
-                <Box key={c.qboclassid} sx={{ pl: 4 }}>
-                  <FormControlLabel
-                    control={
-                      <Checkbox
-                        checked={selected.has(membershipKey(q.qboid, c.qboclassid))}
-                        onChange={() => toggle(membershipKey(q.qboid, c.qboclassid))}
+                )}
+                {q.classes?.map((c) => {
+                  const classKey = membershipKey(q.qboid, c.qboclassid);
+                  return (
+                    <Box key={c.qboclassid} sx={{ pl: 4 }}>
+                      <FormControlLabel
+                        control={<Checkbox checked={selected.has(classKey)} onChange={() => toggle(classKey)} />}
+                        label={`${q.qboname} — ${c.classname}`}
                       />
-                    }
-                    label={`${q.qboname} — ${c.classname}`}
-                  />
-                </Box>
-              ))}
-            </Box>
-          ))}
+                      {selected.has(classKey) && (
+                        <ExclusionPicker
+                          groupId={groupId}
+                          qboId={q.qboid}
+                          expanded={expandedKeys.has(classKey)}
+                          onToggleExpand={() => toggleExpand(classKey)}
+                          excluded={excludedByKey[classKey] || new Set()}
+                          onToggleAccount={(code) => toggleExcludedAccount(classKey, code)}
+                        />
+                      )}
+                    </Box>
+                  );
+                })}
+              </Box>
+            );
+          })}
         </FormGroup>
       </DialogContent>
       <DialogActions>
@@ -209,7 +309,10 @@ export default function ConsolidationGroups() {
                       <Chip
                         key={m.id}
                         size="small"
-                        label={m.classname ? `${m.qboname} — ${m.classname}` : m.qboname}
+                        label={
+                          (m.classname ? `${m.qboname} — ${m.classname}` : m.qboname) +
+                          (m.excludedaccountcodes?.length ? ` (${m.excludedaccountcodes.length} excluded)` : '')
+                        }
                       />
                     ))}
                   </Box>
