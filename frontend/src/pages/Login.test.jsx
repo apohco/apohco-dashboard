@@ -3,7 +3,12 @@ import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 const mockNavigate = vi.fn();
-const mockAuth = { signIn: vi.fn(), confirmSignInStep: vi.fn() };
+const mockAuth = {
+  signIn: vi.fn(),
+  confirmSignInStep: vi.fn(),
+  requestPasswordReset: vi.fn(),
+  confirmPasswordReset: vi.fn(),
+};
 
 vi.mock('react-router-dom', () => ({ useNavigate: () => mockNavigate }));
 vi.mock('../context/AuthContext', () => ({ useAuth: () => mockAuth }));
@@ -30,8 +35,73 @@ async function signInAs(user) {
 
 beforeEach(() => {
   mockNavigate.mockReset();
-  mockAuth.signIn.mockReset();
-  mockAuth.confirmSignInStep.mockReset();
+  Object.values(mockAuth).forEach((fn) => fn.mockReset());
+});
+
+describe('Forgot password', () => {
+  const codeSent = {
+    isPasswordReset: false,
+    nextStep: { resetPasswordStep: 'CONFIRM_RESET_PASSWORD_WITH_CODE', codeDeliveryDetails: { destination: 'p***@g***' } },
+  };
+
+  async function requestCode(user) {
+    await user.click(screen.getByRole('button', { name: 'Forgot password?' }));
+    await user.type(screen.getByLabelText('Username'), ' paul ');
+    await user.click(screen.getByRole('button', { name: 'Email me a code' }));
+  }
+
+  test('emails a code, then sets the new password and returns to sign in', async () => {
+    const user = userEvent.setup();
+    mockAuth.requestPasswordReset.mockResolvedValue(codeSent);
+    mockAuth.confirmPasswordReset.mockResolvedValue(undefined);
+    render(<Login />);
+
+    await requestCode(user);
+    expect(mockAuth.requestPasswordReset).toHaveBeenCalledWith('paul');
+    expect(screen.getByText(/a code was sent to p\*\*\*@g\*\*\*/)).toBeInTheDocument();
+
+    await user.type(screen.getByLabelText('Reset code'), '123456');
+    await user.type(screen.getByLabelText('New Password'), 'BrandNew2026x');
+    await user.click(screen.getByRole('button', { name: 'Set New Password' }));
+
+    expect(mockAuth.confirmPasswordReset).toHaveBeenCalledWith('paul', '123456', 'BrandNew2026x');
+    expect(screen.getByText('Password changed. Sign in with your new password.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Sign In' })).toBeInTheDocument();
+    expect(mockNavigate).not.toHaveBeenCalled();
+  });
+
+  test('keeps the user on the code screen when the code is wrong', async () => {
+    const user = userEvent.setup();
+    mockAuth.requestPasswordReset.mockResolvedValue(codeSent);
+    mockAuth.confirmPasswordReset.mockRejectedValue(new Error('Invalid verification code provided, please try again.'));
+    render(<Login />);
+
+    await requestCode(user);
+    await user.type(screen.getByLabelText('Reset code'), '000000');
+    await user.type(screen.getByLabelText('New Password'), 'BrandNew2026x');
+    await user.click(screen.getByRole('button', { name: 'Set New Password' }));
+
+    expect(screen.getByRole('alert')).toHaveTextContent('Invalid verification code');
+    expect(screen.getByLabelText('Reset code')).toBeInTheDocument();
+  });
+
+  test('shows an error when the code cannot be sent', async () => {
+    const user = userEvent.setup();
+    mockAuth.requestPasswordReset.mockRejectedValue(new Error('Cannot reset password for the user as there is no registered/verified email or phone_number'));
+    render(<Login />);
+
+    await requestCode(user);
+    expect(screen.getByRole('alert')).toHaveTextContent('no registered/verified email');
+    expect(screen.getByRole('button', { name: 'Email me a code' })).toBeInTheDocument();
+  });
+
+  test('"Back to sign in" returns to the sign-in form', async () => {
+    const user = userEvent.setup();
+    render(<Login />);
+    await user.click(screen.getByRole('button', { name: 'Forgot password?' }));
+    await user.click(screen.getByRole('button', { name: 'Back to sign in' }));
+    expect(screen.getByRole('button', { name: 'Sign In' })).toBeInTheDocument();
+  });
 });
 
 describe('Login', () => {

@@ -147,7 +147,7 @@ self-service signup. Create the first user with the AWS CLI, using the
 aws cognito-idp admin-create-user \
   --user-pool-id <UserPoolId> \
   --username paul \
-  --user-attributes Name=email,Value=paul.r.rudolph@gmail.com Name=custom:role,Value=SoftwareAdmin \
+  --user-attributes Name=email,Value=paul.r.rudolph@gmail.com Name=email_verified,Value=true Name=custom:role,Value=SoftwareAdmin \
   --desired-delivery-mediums EMAIL
 
 aws cognito-idp admin-add-user-to-group \
@@ -185,8 +185,16 @@ Groups table, or in the `POST` response):
 aws cognito-idp admin-create-user \
   --user-pool-id <UserPoolId> \
   --username <owner-username> \
-  --user-attributes Name=email,Value=<owner-email> Name=custom:role,Value=Owner Name=custom:groupId,Value=<apohco-groupid> \
+  --user-attributes Name=email,Value=<owner-email> Name=email_verified,Value=true Name=custom:role,Value=Owner Name=custom:groupId,Value=<apohco-groupid> \
   --desired-delivery-mediums EMAIL
+```
+
+`email_verified=true` is what lets the user reset a forgotten password
+themselves (the "Forgot password?" link on the login page emails a code
+to a verified address only). For a user created without it:
+```
+aws cognito-idp admin-update-user-attributes --user-pool-id <UserPoolId> \
+  --username <username> --user-attributes Name=email_verified,Value=true
 ```
 
 On their first login, `postConfirmation` creates both their `Users` row and

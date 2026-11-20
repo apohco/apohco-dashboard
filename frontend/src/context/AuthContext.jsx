@@ -2,6 +2,8 @@ import { createContext, useContext, useEffect, useState, useCallback } from 'rea
 import {
   signIn as amplifySignIn,
   confirmSignIn as amplifyConfirmSignIn,
+  resetPassword as amplifyResetPassword,
+  confirmResetPassword as amplifyConfirmResetPassword,
   signOut as amplifySignOut,
   fetchAuthSession,
 } from 'aws-amplify/auth';
@@ -75,6 +77,20 @@ export function AuthProvider({ children }) {
     [finishStep]
   );
 
+  // Forgot password: Cognito emails a code to the user's verified address.
+  // The user pool hides whether a username exists (PreventUserExistenceErrors),
+  // so this "succeeds" for unknown usernames too.
+  const requestPasswordReset = useCallback(
+    (username) => amplifyResetPassword({ username }),
+    []
+  );
+
+  const confirmPasswordReset = useCallback(
+    (username, confirmationCode, newPassword) =>
+      amplifyConfirmResetPassword({ username, confirmationCode, newPassword }),
+    []
+  );
+
   const signOut = useCallback(async () => {
     await amplifySignOut();
     setUser(null);
@@ -101,6 +117,8 @@ export function AuthProvider({ children }) {
     confirmSignInStep,
     // Kept for existing callers: a new password is just a sign-in challenge answer.
     confirmNewPassword: confirmSignInStep,
+    requestPasswordReset,
+    confirmPasswordReset,
     signOut,
     getIdToken,
   };

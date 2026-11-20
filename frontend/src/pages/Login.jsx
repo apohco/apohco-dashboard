@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import QRCode from 'qrcode';
-import { Box, Paper, TextField, Button, Typography, Alert } from '@mui/material';
+import { Box, Paper, TextField, Button, Typography, Alert, Link } from '@mui/material';
 import { useAuth } from '../context/AuthContext';
 
 const TOTP_ISSUER = 'APOHCO Dashboard';
@@ -52,7 +52,7 @@ function TotpSetup({ setupUri, sharedSecret }) {
 }
 
 export default function Login() {
-  const { signIn, confirmSignInStep } = useAuth();
+  const { signIn, confirmSignInStep, requestPasswordReset, confirmPasswordReset } = useAuth();
   const navigate = useNavigate();
 
   const [username, setUsername] = useState('');
@@ -61,8 +61,49 @@ export default function Login() {
   const [code, setCode] = useState('');
   const [view, setView] = useState('credentials');
   const [totpSetup, setTotpSetup] = useState(null);
+  const [resetDestination, setResetDestination] = useState(null);
+  const [notice, setNotice] = useState(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState(null);
+
+  const showView = (next) => {
+    setError(null);
+    setNotice(null);
+    setCode('');
+    setNewPassword('');
+    setView(next);
+  };
+
+  const submitResetRequest = async (e) => {
+    e.preventDefault();
+    setSubmitting(true);
+    setError(null);
+    try {
+      const result = await requestPasswordReset(username.trim());
+      setResetDestination(result?.nextStep?.codeDeliveryDetails?.destination || null);
+      showView('forgotConfirm');
+    } catch (err) {
+      setError(err);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const submitResetConfirm = async (e) => {
+    e.preventDefault();
+    setSubmitting(true);
+    setError(null);
+    try {
+      await confirmPasswordReset(username.trim(), code, newPassword);
+      setPassword('');
+      showView('credentials');
+      setNotice('Password changed. Sign in with your new password.');
+    } catch (err) {
+      setError(err);
+    } finally {
+      setSubmitting(false);
+    }
+  };
 
   const handleResult = (result) => {
     if (result.isSignedIn) {
@@ -136,6 +177,11 @@ export default function Login() {
             {error.message}
           </Alert>
         )}
+        {notice && (
+          <Alert severity="success" sx={{ mb: 2 }}>
+            {notice}
+          </Alert>
+        )}
 
         {view === 'credentials' && (
           <Box component="form" onSubmit={run(() => signIn(username, password))}>
@@ -160,6 +206,79 @@ export default function Login() {
             <Button fullWidth variant="contained" type="submit" disabled={submitting}>
               {submitting ? 'Signing in...' : 'Sign In'}
             </Button>
+            <Box sx={{ mt: 2, textAlign: 'center' }}>
+              <Link component="button" type="button" variant="body2" onClick={() => showView('forgotRequest')}>
+                Forgot password?
+              </Link>
+            </Box>
+          </Box>
+        )}
+
+        {view === 'forgotRequest' && (
+          <Box component="form" onSubmit={submitResetRequest}>
+            <Typography variant="body2" sx={{ mb: 2 }}>
+              Enter your username and we&apos;ll email a reset code to the address on your account.
+            </Typography>
+            <TextField
+              fullWidth
+              size="small"
+              label="Username"
+              autoFocus
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+              sx={{ mb: 3 }}
+            />
+            <Button fullWidth variant="contained" type="submit" disabled={submitting || !username.trim()}>
+              {submitting ? 'Sending...' : 'Email me a code'}
+            </Button>
+            <Box sx={{ mt: 2, textAlign: 'center' }}>
+              <Link component="button" type="button" variant="body2" onClick={() => showView('credentials')}>
+                Back to sign in
+              </Link>
+            </Box>
+          </Box>
+        )}
+
+        {view === 'forgotConfirm' && (
+          <Box component="form" onSubmit={submitResetConfirm}>
+            <Typography variant="body2" sx={{ mb: 2 }}>
+              {resetDestination
+                ? `If ${username.trim()} is a valid username, a code was sent to ${resetDestination}.`
+                : `If ${username.trim()} is a valid username, a code was sent to the email on the account.`}{' '}
+              Enter it below with a new password.
+            </Typography>
+            <TextField
+              fullWidth
+              size="small"
+              label="Reset code"
+              autoFocus
+              autoComplete="one-time-code"
+              inputProps={{ inputMode: 'numeric' }}
+              value={code}
+              onChange={(e) => setCode(e.target.value.trim())}
+              sx={{ mb: 2 }}
+            />
+            <TextField
+              fullWidth
+              size="small"
+              type="password"
+              label="New Password"
+              helperText="At least 10 characters, with upper and lower case letters and a number."
+              value={newPassword}
+              onChange={(e) => setNewPassword(e.target.value)}
+              sx={{ mb: 3 }}
+            />
+            <Button fullWidth variant="contained" type="submit" disabled={submitting || !code || !newPassword}>
+              {submitting ? 'Saving...' : 'Set New Password'}
+            </Button>
+            <Box sx={{ mt: 2, display: 'flex', justifyContent: 'space-between' }}>
+              <Link component="button" type="button" variant="body2" onClick={() => showView('forgotRequest')}>
+                Send a new code
+              </Link>
+              <Link component="button" type="button" variant="body2" onClick={() => showView('credentials')}>
+                Back to sign in
+              </Link>
+            </Box>
           </Box>
         )}
 
