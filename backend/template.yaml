@@ -68,6 +68,14 @@ Resources:
             Sign in at the APOHCO Financial Dashboard to set a new password.
       UsernameConfiguration:
         CaseSensitive: false
+      # Every user must sign in with an authenticator app (TOTP) on top of
+      # their password. Users without one are taken through setup at their
+      # next sign-in (see frontend/src/pages/Login.jsx). Required pool-wide
+      # because Cognito ID tokens don't record whether MFA was used, so
+      # the API couldn't enforce it per user.
+      MfaConfiguration: 'ON'
+      EnabledMfas:
+        - SOFTWARE_TOKEN_MFA
       AutoVerifiedAttributes:
         - email
       Policies:
@@ -127,6 +135,38 @@ Resources:
       UserPoolId: !Ref ApohcoUserPool
       GroupName: SoftwareRep
       Description: Technical onboarding — QBO connections, Group setup
+
+  # Sole gate for the Controller module (together with the SoftwareAdmin
+  # role). Only Paul is added to this group, by hand: see docs/SETUP.md.
+  ControllerOwnerUserPoolGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      UserPoolId: !Ref ApohcoUserPool
+      GroupName: ControllerOwner
+      Description: Only member may use the Controller module
+
+  # --- Controller module: async GL pulls ---
+  # One message per month to pull ({ taskId }). Visibility timeout is 6x
+  # the worker timeout, per AWS guidance for SQS event sources. After 3
+  # failed receives a message goes to the dead-letter queue (the worker
+  # also marks the task Failed on its 3rd attempt).
+  CtrlGlPullDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub apohco-ctrl-gl-pull-dlq-${Stage}
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+
+  CtrlGlPullQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub apohco-ctrl-gl-pull-${Stage}
+      VisibilityTimeout: 1080
+      MessageRetentionPeriod: 86400
+      SqsManagedSseEnabled: true
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt CtrlGlPullDeadLetterQueue.Arn
+        maxReceiveCount: 3
 
   # Temporary holding area for Manual Upload CSV/Excel files — uploaded via
   # a presigned URL, parsed and deleted by manualUpload, with a 1-day
@@ -475,6 +515,134 @@ Resources:
             RestApiId: !Ref ApohcoDashboardApi
             Path: /api/reports/cash-flow
             Method: post
+
+  # Daily renewal of every API-connected QBO file's OAuth tokens, so a file
+  # nobody pulls from for a while doesn't lose its connection. Reads no
+  # financial data. No API route.
+  RefreshQBOTokensFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: refreshQBOTokens
+      Handler: src/functions/qbo/refreshQBOTokens/index.handler
+      Timeout: 120
+      Policies: *lambdaPolicies
+      Events:
+        Daily:
+          Type: Schedule
+          Properties:
+            Schedule: cron(0 9 * * ? *)
+            Description: Renew QBO OAuth tokens daily (09:00 UTC)
+
+  # --- Controller module (SoftwareAdmin + ControllerOwner only; see
+  # shared/controllerAuth.js). Read-only to QuickBooks. ---
+  StartCtrlSyncFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: startCtrlSync
+      Handler: src/functions/controller/startCtrlSync/index.handler
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: secretsmanager:GetSecretValue
+              Resource:
+                - !Ref DbCredentialsSecretArn
+                - !Ref AppSecretsArn
+        - VPCAccessPolicy: {}
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt CtrlGlPullQueue.QueueName
+      Environment:
+        Variables:
+          COGNITO_USER_POOL_ID: !Ref ApohcoUserPool
+          COGNITO_CLIENT_ID: !Ref ApohcoUserPoolClient
+          CTRL_GL_PULL_QUEUE_URL: !Ref CtrlGlPullQueue
+      Events:
+        Start:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/controller/sync
+            Method: post
+
+  CtrlGlPullWorkerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: ctrlGlPullWorker
+      Handler: src/functions/controller/ctrlGlPullWorker/index.handler
+      Timeout: 180
+      MemorySize: 512
+      Policies: *lambdaPolicies
+      Events:
+        Queue:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt CtrlGlPullQueue.Arn
+            BatchSize: 1
+            # Keeps us well inside QBO's per-company API rate limits.
+            ScalingConfig:
+              MaximumConcurrency: 2
+
+  GetCtrlJobsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: getCtrlJobs
+      Handler: src/functions/controller/getCtrlJobs/index.handler
+      Policies: *lambdaPolicies
+      Environment: *cognitoAuthEnv
+      Events:
+        Collection:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/controller/jobs
+            Method: get
+        Item:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/controller/jobs/{jobId}
+            Method: get
+
+  GetCtrlLedgerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: getCtrlLedger
+      Handler: src/functions/controller/getCtrlLedger/index.handler
+      Policies: *lambdaPolicies
+      Environment: *cognitoAuthEnv
+      Events:
+        Overview:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/controller/overview
+            Method: get
+        Lines:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/controller/lines
+            Method: get
+
+  ManageCtrlEntitiesFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: manageCtrlEntities
+      Handler: src/functions/controller/manageCtrlEntities/index.handler
+      Policies: *lambdaPolicies
+      Environment: *cognitoAuthEnv
+      Events:
+        Collection:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/controller/entities
+            Method: any
+        Item:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/controller/entities/{entityId}
+            Method: any
 
 Outputs:
   ApiUrl:

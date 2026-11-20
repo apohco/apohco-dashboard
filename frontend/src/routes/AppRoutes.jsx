@@ -12,6 +12,10 @@ import ChartOfAccountsSetup from '../pages/Settings/ChartOfAccountsSetup';
 import ConsolidationGroups from '../pages/Settings/ConsolidationGroups';
 import QBODataSync from '../pages/Settings/QBODataSync';
 import ReportLayout from '../pages/Settings/ReportLayout';
+import RequireControllerOwner from '../components/auth/RequireControllerOwner';
+import ControllerOverview from '../pages/Controller/ControllerOverview';
+import LedgerBrowser from '../pages/Controller/LedgerBrowser';
+import EntitiesSetup from '../pages/Controller/EntitiesSetup';
 
 export default function AppRoutes() {
   return (
@@ -30,6 +34,11 @@ export default function AppRoutes() {
           <Route path="settings/consolidation-groups" element={<ConsolidationGroups />} />
           <Route path="settings/qbo-data-sync" element={<QBODataSync />} />
           <Route path="settings/report-layout" element={<ReportLayout />} />
+          <Route element={<RequireControllerOwner />}>
+            <Route path="controller" element={<ControllerOverview />} />
+            <Route path="controller/ledger" element={<LedgerBrowser />} />
+            <Route path="controller/entities" element={<EntitiesSetup />} />
+          </Route>
           <Route path="*" element={<Navigate to="/financial/profit-and-loss" replace />} />
         </Route>
       </Route>

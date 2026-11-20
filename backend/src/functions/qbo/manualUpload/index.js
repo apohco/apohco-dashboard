@@ -5,6 +5,7 @@ const { query, withTransaction } = require('../../../shared/db');
 const { json, withErrorHandling } = require('../../../shared/response');
 const { getPresignedUploadUrl, getObjectBuffer, deleteObject } = require('../../../shared/s3Client');
 const { parseTransactionFile } = require('../../../shared/fileParser');
+const { chunk, buildBatchInsert } = require('../../../shared/bulkInsert');
 
 const ALLOWED_ROLES = ['Owner', 'Manager', 'SoftwareRep', 'SoftwareAdmin'];
 const MAX_ERRORS_RETURNED = 50;
@@ -49,28 +50,6 @@ async function resolveClasses(qboId, classNames) {
   }
 
   return nameToId;
-}
-
-function chunk(array, size) {
-  const chunks = [];
-  for (let i = 0; i < array.length; i += size) chunks.push(array.slice(i, i + size));
-  return chunks;
-}
-
-// Builds a single multi-row "INSERT ... VALUES ($1,$2,...),($n+1,...)..."
-// statement (and its flattened parameter list) for a batch of rows, each
-// given as an array of column values in the same order as `columns`.
-function buildBatchInsert(table, columns, valueRows) {
-  const params = [];
-  const valueGroups = valueRows.map((row) => {
-    const placeholders = row.map((value) => {
-      params.push(value);
-      return `$${params.length}`;
-    });
-    return `(${placeholders.join(', ')})`;
-  });
-  const sql = `INSERT INTO ${table} (${columns.join(', ')}) VALUES ${valueGroups.join(', ')}`;
-  return { sql, params };
 }
 
 // Upserts ChartOfAccountsMappings for every account referenced in the
@@ -205,6 +184,7 @@ async function handleConfirm(body, claims) {
         [
           'GroupId', 'QBOId', 'QBOClassId', 'TransactionDate', 'AccountCode', 'AccountName',
           'Debit', 'Credit', 'Amount', 'TransactionType', 'Description', 'QBOTransactionId',
+          'PayeeName',
         ],
         batch.map((row) => [
           qbo.groupid,
@@ -219,6 +199,7 @@ async function handleConfirm(body, claims) {
           row.transactionType,
           row.description,
           row.qboTransactionId,
+          row.payeeName,
         ])
       );
       await client.query(sql, params);

@@ -1,41 +1,16 @@
 const { requireAuth } = require('../../../shared/verifyToken');
 const { requireRole, requireGroupAccess } = require('../../../shared/authorize');
-const { encrypt, decrypt } = require('../../../shared/crypto');
 const { query, withTransaction } = require('../../../shared/db');
 const { json, withErrorHandling } = require('../../../shared/response');
+const { getValidAccessToken } = require('../../../shared/qboTokens');
+const { insertRows } = require('../../../shared/bulkInsert');
 const {
-  refreshAccessToken,
   queryAccounts,
   queryClasses,
   getGeneralLedgerReport,
   flattenGeneralLedgerReport,
   buildAccountLookup,
 } = require('../../../shared/qboClient');
-
-const TOKEN_REFRESH_BUFFER_MS = 5 * 60 * 1000; // refresh if expiring within 5 minutes
-
-async function getValidAccessToken(qbo) {
-  const expiry = new Date(qbo.tokenexpiry).getTime();
-  if (expiry - Date.now() > TOKEN_REFRESH_BUFFER_MS) {
-    return decrypt(qbo.accesstoken);
-  }
-
-  const refreshToken = await decrypt(qbo.refreshtoken);
-  const refreshed = await refreshAccessToken(refreshToken);
-  const newTokenExpiry = new Date(Date.now() + refreshed.expiresInSeconds * 1000).toISOString();
-
-  await query(
-    `UPDATE QBOs SET AccessToken = $1, RefreshToken = $2, TokenExpiry = $3 WHERE QBOId = $4`,
-    [
-      await encrypt(refreshed.accessToken),
-      await encrypt(refreshed.refreshToken),
-      newTokenExpiry,
-      qbo.qboid,
-    ]
-  );
-
-  return refreshed.accessToken;
-}
 
 async function syncClasses(qboId, realmId, accessToken) {
   const classes = await queryClasses(realmId, accessToken);
@@ -99,30 +74,36 @@ async function syncTransactions(
       [qbo.qboid, startDate, endDate]
     );
 
-    for (const row of rows) {
-      if (!row.transactionDate) continue; // skip subtotal/summary lines with no date
+    // Skip subtotal/summary lines with no date. Batched inserts (not one
+    // per row) to stay inside API Gateway's ~29-second limit.
+    const valueRows = rows
+      .filter((row) => row.transactionDate)
+      .map((row) => [
+        groupId,
+        qbo.qboid,
+        row.className ? classNameToId.get(row.className) || null : null,
+        row.transactionDate,
+        row.accountCode,
+        row.accountName,
+        row.debit,
+        row.credit,
+        row.amount,
+        row.transactionType,
+        row.description,
+        row.qboTransactionId,
+        row.payeeName,
+      ]);
 
-      const qboClassId = row.className ? classNameToId.get(row.className) || null : null;
-
-      await client.query(
-        `INSERT INTO RawTransactions
-           (GroupId, QBOId, QBOClassId, TransactionDate, AccountCode, AccountName,
-            Debit, Credit, Amount, TransactionType, Description, QBOTransactionId)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+    if (valueRows.length) {
+      await insertRows(
+        client,
+        'RawTransactions',
         [
-          groupId,
-          qbo.qboid,
-          qboClassId,
-          row.transactionDate,
-          row.accountCode,
-          row.accountName,
-          row.debit,
-          row.credit,
-          row.amount,
-          row.transactionType,
-          row.description,
-          row.qboTransactionId,
-        ]
+          'GroupId', 'QBOId', 'QBOClassId', 'TransactionDate', 'AccountCode', 'AccountName',
+          'Debit', 'Credit', 'Amount', 'TransactionType', 'Description', 'QBOTransactionId',
+          'PayeeName',
+        ],
+        valueRows
       );
     }
   });
@@ -156,7 +137,7 @@ exports.handler = withErrorHandling(async (event) => {
 
   requireGroupAccess(claims, qbo.groupid);
 
-  const accessToken = await getValidAccessToken(qbo);
+  const accessToken = await getValidAccessToken(qbo.qboid);
 
   let classNameToId = new Map();
   if (qbo.isclassbased) {

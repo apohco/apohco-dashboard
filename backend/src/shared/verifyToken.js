@@ -26,7 +26,8 @@ function extractToken(event) {
 }
 
 // Verifies the Cognito ID token on the request and returns normalized
-// claims: { userId, username, email, role, groupId }.
+// claims: { userId, username, email, role, groupId, groups }.
+// `groups` is the caller's Cognito group memberships (e.g. ControllerOwner).
 // Throws if the header is missing or the token fails verification.
 async function requireAuth(event) {
   const token = extractToken(event);
@@ -55,6 +56,7 @@ async function requireAuth(event) {
     email: payload.email,
     role: payload['custom:role'],
     groupId: payload['custom:groupId'] || null,
+    groups: Array.isArray(payload['cognito:groups']) ? payload['cognito:groups'] : [],
   };
 }
 

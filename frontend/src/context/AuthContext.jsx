@@ -17,8 +17,13 @@ function claimsFromIdToken(idToken) {
     email: payload.email,
     role: payload['custom:role'],
     groupId: payload['custom:groupId'] || null,
+    groups: Array.isArray(payload['cognito:groups']) ? payload['cognito:groups'] : [],
   };
 }
+
+// Only TOTP (authenticator app) MFA is enabled on the user pool, so when
+// Cognito asks which MFA type to use or set up, the answer is always TOTP.
+const AUTO_ANSWER_STEPS = ['CONTINUE_SIGN_IN_WITH_MFA_SELECTION', 'CONTINUE_SIGN_IN_WITH_MFA_SETUP_SELECTION'];
 
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(null);
@@ -41,28 +46,33 @@ export function AuthProvider({ children }) {
     loadSession().finally(() => setInitializing(false));
   }, [loadSession]);
 
-  // Returns { nextStep } for the Login page to react to (e.g. a temporary
-  // password that must be replaced, per AllowAdminCreateUserOnly).
-  const signIn = useCallback(
-    async (username, password) => {
-      const result = await amplifySignIn({ username, password });
-      if (result.isSignedIn) {
+  const finishStep = useCallback(
+    async (result) => {
+      let current = result;
+      while (!current.isSignedIn && AUTO_ANSWER_STEPS.includes(current.nextStep?.signInStep)) {
+        current = await amplifyConfirmSignIn({ challengeResponse: 'TOTP' });
+      }
+      if (current.isSignedIn) {
         await loadSession();
       }
-      return result;
+      return current;
     },
     [loadSession]
   );
 
-  const confirmNewPassword = useCallback(
-    async (newPassword) => {
-      const result = await amplifyConfirmSignIn({ challengeResponse: newPassword });
-      if (result.isSignedIn) {
-        await loadSession();
-      }
-      return result;
-    },
-    [loadSession]
+  // Returns { nextStep } for the Login page to react to: a temporary
+  // password that must be replaced (per AllowAdminCreateUserOnly), first-
+  // time authenticator app setup, or an authenticator code.
+  const signIn = useCallback(
+    async (username, password) => finishStep(await amplifySignIn({ username, password })),
+    [finishStep]
+  );
+
+  // Answers the current sign-in challenge: a new password, or a 6-digit
+  // authenticator code (both setup verification and regular sign-in).
+  const confirmSignInStep = useCallback(
+    async (challengeResponse) => finishStep(await amplifyConfirmSignIn({ challengeResponse })),
+    [finishStep]
   );
 
   const signOut = useCallback(async () => {
@@ -85,8 +95,12 @@ export function AuthProvider({ children }) {
     isAuthenticated: Boolean(user),
     role: user?.role ?? null,
     groupId: user?.groupId ?? null,
+    groups: user?.groups ?? [],
+    isControllerOwner: user?.role === 'SoftwareAdmin' && (user?.groups ?? []).includes('ControllerOwner'),
     signIn,
-    confirmNewPassword,
+    confirmSignInStep,
+    // Kept for existing callers: a new password is just a sign-in challenge answer.
+    confirmNewPassword: confirmSignInStep,
     signOut,
     getIdToken,
   };

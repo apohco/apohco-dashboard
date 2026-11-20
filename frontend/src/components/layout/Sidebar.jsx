@@ -16,6 +16,11 @@ import AssessmentOutlinedIcon from '@mui/icons-material/AssessmentOutlined';
 import DescriptionOutlinedIcon from '@mui/icons-material/DescriptionOutlined';
 import AccountBalanceOutlinedIcon from '@mui/icons-material/AccountBalanceOutlined';
 import SwapVertOutlinedIcon from '@mui/icons-material/SwapVertOutlined';
+import FactCheckOutlinedIcon from '@mui/icons-material/FactCheckOutlined';
+import DashboardOutlinedIcon from '@mui/icons-material/DashboardOutlined';
+import ListAltOutlinedIcon from '@mui/icons-material/ListAltOutlined';
+import ApartmentOutlinedIcon from '@mui/icons-material/ApartmentOutlined';
+import { useAuth } from '../../context/AuthContext';
 
 export const SIDEBAR_WIDTH = 240;
 
@@ -25,10 +30,46 @@ const financialItems = [
   { label: 'Cash Flow', path: '/financial/cash-flow', icon: <SwapVertOutlinedIcon fontSize="small" /> },
 ];
 
-export default function Sidebar() {
+// Shown only to the ControllerOwner (the API enforces the same rule).
+const controllerItems = [
+  { label: 'Overview', path: '/controller', icon: <DashboardOutlinedIcon fontSize="small" /> },
+  { label: 'Ledger Browser', path: '/controller/ledger', icon: <ListAltOutlinedIcon fontSize="small" /> },
+  { label: 'Entities', path: '/controller/entities', icon: <ApartmentOutlinedIcon fontSize="small" /> },
+];
+
+function NavSection({ label, icon, items, open, onToggle }) {
   const navigate = useNavigate();
   const location = useLocation();
+  return (
+    <>
+      <ListItemButton onClick={onToggle}>
+        <ListItemIcon sx={{ minWidth: 32 }}>{icon}</ListItemIcon>
+        <ListItemText primary={label} />
+        {open ? <ExpandLess /> : <ExpandMore />}
+      </ListItemButton>
+      <Collapse in={open} timeout="auto" unmountOnExit>
+        <List component="div" disablePadding dense>
+          {items.map((item) => (
+            <ListItemButton
+              key={item.path}
+              selected={location.pathname === item.path}
+              onClick={() => navigate(item.path)}
+              sx={{ pl: 4 }}
+            >
+              <ListItemIcon sx={{ minWidth: 32 }}>{item.icon}</ListItemIcon>
+              <ListItemText primary={item.label} />
+            </ListItemButton>
+          ))}
+        </List>
+      </Collapse>
+    </>
+  );
+}
+
+export default function Sidebar() {
+  const { isControllerOwner } = useAuth();
   const [financialOpen, setFinancialOpen] = useState(true);
+  const [controllerOpen, setControllerOpen] = useState(true);
 
   return (
     <Drawer
@@ -47,28 +88,22 @@ export default function Sidebar() {
       <Toolbar />
       <Box sx={{ overflow: 'auto', py: 1 }}>
         <List component="nav" dense>
-          <ListItemButton onClick={() => setFinancialOpen((v) => !v)}>
-            <ListItemIcon sx={{ minWidth: 32 }}>
-              <AssessmentOutlinedIcon fontSize="small" />
-            </ListItemIcon>
-            <ListItemText primary="Financial" />
-            {financialOpen ? <ExpandLess /> : <ExpandMore />}
-          </ListItemButton>
-          <Collapse in={financialOpen} timeout="auto" unmountOnExit>
-            <List component="div" disablePadding dense>
-              {financialItems.map((item) => (
-                <ListItemButton
-                  key={item.path}
-                  selected={location.pathname === item.path}
-                  onClick={() => navigate(item.path)}
-                  sx={{ pl: 4 }}
-                >
-                  <ListItemIcon sx={{ minWidth: 32 }}>{item.icon}</ListItemIcon>
-                  <ListItemText primary={item.label} />
-                </ListItemButton>
-              ))}
-            </List>
-          </Collapse>
+          <NavSection
+            label="Financial"
+            icon={<AssessmentOutlinedIcon fontSize="small" />}
+            items={financialItems}
+            open={financialOpen}
+            onToggle={() => setFinancialOpen((v) => !v)}
+          />
+          {isControllerOwner && (
+            <NavSection
+              label="Controller"
+              icon={<FactCheckOutlinedIcon fontSize="small" />}
+              items={controllerItems}
+              open={controllerOpen}
+              onToggle={() => setControllerOpen((v) => !v)}
+            />
+          )}
         </List>
       </Box>
     </Drawer>

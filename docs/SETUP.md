@@ -235,3 +235,85 @@ Group membership).
      "status": "200"
    }]
    ```
+
+## 9. Controller module (Phase 1: Foundation)
+
+The Controller module stores dated, append-only snapshots of each QBO
+file's General Ledger, one month per pull. Only a `SoftwareAdmin` who is
+also in the `ControllerOwner` Cognito group can see or call it. It never
+writes to QuickBooks. See `docs/Controller Module Spec — CFO Tool.md`.
+
+### 9.1 Before deploying: authenticator app (MFA) for every user
+
+This release turns on **required TOTP MFA** for the whole user pool
+(`MfaConfiguration: ON`, `SOFTWARE_TOKEN_MFA` only). Every existing user is
+asked to set up an authenticator app (Google Authenticator, Microsoft
+Authenticator, 1Password, ...) at their next sign-in. Let them know first.
+
+When `sam deploy` shows the change set, check that `ApohcoUserPool` is
+listed as **Modify** with **Replacement: False**. If it ever says
+`Replacement: True`, cancel the deploy: replacing the pool would delete
+every user account.
+
+If a user loses their authenticator, an admin resets it so they can set it
+up again at next sign-in:
+```
+aws cognito-idp admin-set-user-mfa-preference --user-pool-id <UserPoolId> \
+  --username <username> --software-token-mfa-settings Enabled=false,PreferredMfa=false
+```
+
+### 9.2 Deploy
+
+```
+cd backend
+npm install
+npm test            # backend unit tests
+sam build
+sam deploy          # review the change set (see 9.1)
+```
+
+Then apply the new migrations (same as section 1):
+```
+cd backend
+npm run db:migrate   # applies 006_raw_transactions_payee.sql, 007_controller_foundation.sql
+```
+
+New resources: the `ControllerOwner` Cognito group, the
+`apohco-ctrl-gl-pull-<stage>` SQS queue and its dead-letter queue, the
+`startCtrlSync`, `ctrlGlPullWorker`, `getCtrlJobs`, `getCtrlLedger`,
+`manageCtrlEntities` functions, and `refreshQBOTokens` (daily at 09:00 UTC,
+renews every API-connected QBO file's tokens so they don't lapse; it reads
+no financial data).
+
+Frontend: `cd frontend && npm install && npm test`, then push; Amplify
+rebuilds as usual. No new environment variables.
+
+### 9.3 Grant Controller access (Paul only)
+
+```
+aws cognito-idp admin-add-user-to-group --user-pool-id <UserPoolId> \
+  --username paul --group-name ControllerOwner
+```
+Sign out and back in afterwards: group membership is read from the ID
+token, which is only reissued at sign-in. Do not add anyone else to this
+group. Membership can be checked with:
+```
+aws cognito-idp list-users-in-group --user-pool-id <UserPoolId> --group-name ControllerOwner
+```
+
+### 9.4 First use
+
+1. **Controller → Entities**: add each dental home, linked to its class in
+   the management company file and to its own QBO file.
+2. **Controller → Overview**: pick a QBO file and a month range (up to 36
+   months per pull) and click **Pull**. Each month is pulled separately in
+   the background; the page shows progress. Repeat per file for the
+   backfill.
+3. **Controller → Ledger Browser**: browse any stored month. Re-pulling a
+   month keeps the earlier pull; tick **Compare with previous pull** to see
+   lines added, changed or removed since.
+
+A month that fails three times is marked Failed (the message lands in the
+dead-letter queue); start the pull again once the cause is fixed. If a
+file shows **Last renewed** in amber on the Overview, its QBO connection
+needs reconnecting in Settings → QBO API Setup.

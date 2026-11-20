@@ -162,15 +162,23 @@ function flattenGeneralLedgerReport(report, accountLookup) {
         const account = row.Header?.ColData ? resolveAccount(row.Header.ColData) : currentAccount;
         walk(row, account);
       } else if (row.ColData && currentAccount) {
-        const get = (type) => {
+        const cell = (type) => {
           const idx = colIndex(type);
-          return idx >= 0 ? row.ColData[idx]?.value : undefined;
+          return idx >= 0 ? row.ColData[idx] : undefined;
         };
+        const get = (type) => cell(type)?.value;
 
         const debit = parseFloat(get('debt_amt')) || 0;
         const credit = parseFloat(get('credit_amt')) || 0;
 
+        // QBO puts entity ids on report cells as an `id` attribute: the
+        // txn_type cell carries the transaction's own Id, and the name
+        // cell the payee's (Vendor/Customer/Employee) Id.
         rows.push({
+          payeeName: get('name') || null,
+          payeeQBOId: cell('name')?.id || null,
+          qboTxnId: cell('txn_type')?.id || null,
+          docNum: get('doc_num') || null,
           transactionDate: get('tx_date') || null,
           accountCode: currentAccount.code,
           accountName: currentAccount.name,

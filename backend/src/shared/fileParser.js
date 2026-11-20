@@ -106,7 +106,7 @@ function resolveAccountCodeAndName(raw) {
 const KNOWN_HEADERS = [
   'transactiondate', 'account', 'distributionaccount', 'accountcode', 'accountname',
   'debit', 'credit', 'amount', 'classification', 'transactiontype', 'description',
-  'classname', 'qbotransactionid',
+  'classname', 'qbotransactionid', 'payee', 'payeename',
 ];
 
 // QBO's own report exports (e.g. "General Ledger") put a multi-row title
@@ -184,7 +184,8 @@ function rowsFromBuffer(buffer, fileExtension) {
 // At least one of Debit, Credit, or Amount must be provided (Amount is
 // computed from Debit-Credit if it's the one omitted) — a row with all
 // three blank is a validation error, not a silent $0 transaction.
-// Optional: TransactionType, Description, ClassName.
+// Optional: TransactionType, Description, ClassName, PayeeName (also
+// accepted as "Payee" or "Name").
 function parseTransactionFile(buffer, fileExtension, knownClassifications = {}) {
   const rawRows = rowsFromBuffer(buffer, fileExtension);
 
@@ -259,6 +260,8 @@ function parseTransactionFile(buffer, fileExtension, knownClassifications = {}) 
       transactionType: String(getField(raw, 'TransactionType') ?? '').trim() || null,
       description: String(getField(raw, 'Description') ?? '').trim() || null,
       qboTransactionId: String(getField(raw, 'QBOTransactionId') ?? '').trim() || null,
+      // QBO's own GL export labels the payee column "Name".
+      payeeName: String(getField(raw, ['PayeeName', 'Payee', 'Name']) ?? '').trim() || null,
       className,
     });
   });
