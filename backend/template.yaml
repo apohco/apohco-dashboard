@@ -357,6 +357,59 @@ Resources:
             Path: /api/settings/groups/{groupId}
             Method: any
 
+  # Settings > Users. SoftwareAdmin only (checked in the handler). The IAM
+  # policy allows only the Cognito admin calls the screen needs, on this
+  # app's own user pool; there is no AdminDeleteUser.
+  ManageUsersFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: manageUsers
+      Handler: src/functions/settings/manageUsers/index.handler
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: secretsmanager:GetSecretValue
+              Resource:
+                - !Ref DbCredentialsSecretArn
+                - !Ref AppSecretsArn
+            - Effect: Allow
+              Action:
+                - cognito-idp:ListUsers
+                - cognito-idp:ListUsersInGroup
+                - cognito-idp:AdminGetUser
+                - cognito-idp:AdminCreateUser
+                - cognito-idp:AdminUpdateUserAttributes
+                - cognito-idp:AdminDeleteUserAttributes
+                - cognito-idp:AdminDisableUser
+                - cognito-idp:AdminEnableUser
+                - cognito-idp:AdminSetUserMFAPreference
+                - cognito-idp:AdminResetUserPassword
+                - cognito-idp:AdminUserGlobalSignOut
+                - cognito-idp:AdminAddUserToGroup
+                - cognito-idp:AdminRemoveUserFromGroup
+              Resource: !GetAtt ApohcoUserPool.Arn
+        - VPCAccessPolicy: {}
+      Environment: *cognitoAuthEnv
+      Events:
+        Collection:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/settings/users
+            Method: any
+        Item:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/settings/users/{username}
+            Method: put
+        Action:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/settings/users/{username}/{action}
+            Method: post
+
   ManageAccountGroupingsFunction:
     Type: AWS::Serverless::Function
     Properties:

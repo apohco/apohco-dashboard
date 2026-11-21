@@ -197,6 +197,15 @@ aws cognito-idp admin-update-user-attributes --user-pool-id <UserPoolId> \
   --username <username> --user-attributes Name=email_verified,Value=true
 ```
 
+Once Paul can sign in, the easier route is **Settings → Users → Invite
+user** (SoftwareAdmin only). It creates the user with a verified email and
+the right role and practice, and Cognito emails the temporary password. The
+same screen edits email, role and practice, resends invites, sends password
+resets, resets a lost authenticator app, and disables or re-enables
+accounts. Accounts are never deleted from the app. The ControllerOwner
+account is locked on that screen and can only be changed with the CLI.
+Every change is recorded in `UserAdminAuditLog` (migration 008).
+
 On their first login, `postConfirmation` creates both their `Users` row and
 a `GroupUsers` row linking them to the APOHCO Group as Owner. Manager and
 Team Member users are created the same way, with `custom:role` set to

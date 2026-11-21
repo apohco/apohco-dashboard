@@ -111,6 +111,14 @@ export default function Login() {
       return;
     }
     const step = result.nextStep?.signInStep;
+    // An admin reset this password (Settings > Users): Cognito has already
+    // emailed a code, so go straight to entering it.
+    if (step === 'RESET_PASSWORD') {
+      setResetDestination(null);
+      showView('forgotConfirm');
+      setNotice('Your password was reset by an administrator. Check your email for a reset code.');
+      return;
+    }
     const nextView = STEP_VIEWS[step];
     if (!nextView) {
       setError(new Error(`Unsupported sign-in step: ${step}`));

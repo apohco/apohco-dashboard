@@ -95,6 +95,20 @@ describe('Forgot password', () => {
     expect(screen.getByRole('button', { name: 'Email me a code' })).toBeInTheDocument();
   });
 
+  test('after an admin reset, sign-in goes straight to entering the emailed code', async () => {
+    const user = userEvent.setup();
+    mockAuth.signIn.mockResolvedValue({ isSignedIn: false, nextStep: { signInStep: 'RESET_PASSWORD' } });
+    mockAuth.confirmPasswordReset.mockResolvedValue(undefined);
+    render(<Login />);
+    await signInAs(user);
+
+    expect(screen.getByText(/reset by an administrator/)).toBeInTheDocument();
+    await user.type(screen.getByLabelText('Reset code'), '111222');
+    await user.type(screen.getByLabelText('New Password'), 'BrandNew2026x');
+    await user.click(screen.getByRole('button', { name: 'Set New Password' }));
+    expect(mockAuth.confirmPasswordReset).toHaveBeenCalledWith('paul', '111222', 'BrandNew2026x');
+  });
+
   test('"Back to sign in" returns to the sign-in form', async () => {
     const user = userEvent.setup();
     render(<Login />);

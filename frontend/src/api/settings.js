@@ -132,3 +132,15 @@ export const confirmManualUpload = (qboId, s3Key, startDate, endDate) =>
   apiClient
     .post('/api/qbo/manual-upload/confirm', { qboId, s3Key, startDate, endDate })
     .then((r) => r.data);
+
+// Users (Settings > Users) — SoftwareAdmin only
+export const listUsers = () => apiClient.get('/api/settings/users').then((r) => r.data);
+
+export const inviteUser = (user) => apiClient.post('/api/settings/users', user).then((r) => r.data);
+
+export const updateUser = (username, changes) =>
+  apiClient.put(`/api/settings/users/${encodeURIComponent(username)}`, changes).then((r) => r.data);
+
+// action: 'disable' | 'enable' | 'reset-mfa' | 'reset-password' | 'resend-invite'
+export const userAction = (username, action) =>
+  apiClient.post(`/api/settings/users/${encodeURIComponent(username)}/${action}`).then((r) => r.data);

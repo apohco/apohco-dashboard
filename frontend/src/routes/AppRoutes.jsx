@@ -12,6 +12,8 @@ import ChartOfAccountsSetup from '../pages/Settings/ChartOfAccountsSetup';
 import ConsolidationGroups from '../pages/Settings/ConsolidationGroups';
 import QBODataSync from '../pages/Settings/QBODataSync';
 import ReportLayout from '../pages/Settings/ReportLayout';
+import UserManagement from '../pages/Settings/UserManagement';
+import MyProfile from '../pages/Profile/MyProfile';
 import RequireControllerOwner from '../components/auth/RequireControllerOwner';
 import ControllerOverview from '../pages/Controller/ControllerOverview';
 import LedgerBrowser from '../pages/Controller/LedgerBrowser';
@@ -34,6 +36,8 @@ export default function AppRoutes() {
           <Route path="settings/consolidation-groups" element={<ConsolidationGroups />} />
           <Route path="settings/qbo-data-sync" element={<QBODataSync />} />
           <Route path="settings/report-layout" element={<ReportLayout />} />
+          <Route path="settings/users" element={<UserManagement />} />
+          <Route path="profile" element={<MyProfile />} />
           <Route element={<RequireControllerOwner />}>
             <Route path="controller" element={<ControllerOverview />} />
             <Route path="controller/ledger" element={<LedgerBrowser />} />

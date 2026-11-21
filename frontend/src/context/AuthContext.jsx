@@ -4,6 +4,8 @@ import {
   confirmSignIn as amplifyConfirmSignIn,
   resetPassword as amplifyResetPassword,
   confirmResetPassword as amplifyConfirmResetPassword,
+  updatePassword as amplifyUpdatePassword,
+  fetchMFAPreference as amplifyFetchMFAPreference,
   signOut as amplifySignOut,
   fetchAuthSession,
 } from 'aws-amplify/auth';
@@ -91,6 +93,18 @@ export function AuthProvider({ children }) {
     []
   );
 
+  // My Profile: change your own password while signed in.
+  const changePassword = useCallback(
+    (oldPassword, newPassword) => amplifyUpdatePassword({ oldPassword, newPassword }),
+    []
+  );
+
+  // My Profile: whether an authenticator app is set up for this account.
+  const getMfaStatus = useCallback(async () => {
+    const pref = await amplifyFetchMFAPreference();
+    return { totpEnabled: (pref?.enabled || []).includes('TOTP') };
+  }, []);
+
   const signOut = useCallback(async () => {
     await amplifySignOut();
     setUser(null);
@@ -119,6 +133,8 @@ export function AuthProvider({ children }) {
     confirmNewPassword: confirmSignInStep,
     requestPasswordReset,
     confirmPasswordReset,
+    changePassword,
+    getMfaStatus,
     signOut,
     getIdToken,
   };

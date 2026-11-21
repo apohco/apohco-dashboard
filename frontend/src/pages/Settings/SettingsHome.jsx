@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
 
 const settingsSections = [
+  { label: 'Users', path: '/settings/users', roles: ['SoftwareAdmin'] },
   { label: 'Manage Groups', path: '/settings/groups', roles: ['SoftwareAdmin'] },
   { label: 'QBO API Setup', path: '/settings/qbo-setup', roles: ['SoftwareAdmin', 'SoftwareRep'] },
   { label: 'Chart of Accounts', path: '/settings/chart-of-accounts', roles: ['Owner', 'Manager'] },

@@ -41,6 +41,14 @@ export default function Header() {
             <MenuItem
               onClick={() => {
                 setAnchorEl(null);
+                navigate('/profile');
+              }}
+            >
+              My Profile
+            </MenuItem>
+            <MenuItem
+              onClick={() => {
+                setAnchorEl(null);
                 navigate('/settings');
               }}
             >
