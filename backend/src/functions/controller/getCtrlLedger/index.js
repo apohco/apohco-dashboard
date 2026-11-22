@@ -20,7 +20,7 @@ const likePattern = (s) => `%${String(s).replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
 
 const LINE_COLS = [
   'LineId', 'SnapshotId', 'Fingerprint', 'ContentHash', 'TxnDate', 'TxnType', 'DocNum', 'QBOTxnId',
-  'PayeeName', 'Memo', 'AccountCode', 'AccountName', 'ClassName', 'Debit', 'Credit', 'Amount',
+  'PayeeName', 'Memo', 'AccountCode', 'AccountName', 'ClassName', 'Debit', 'Credit', 'Amount', 'SplitAccount',
 ];
 const cols = (alias) => LINE_COLS.map((c) => `${alias}.${c}`).join(', ');
 // Previous-snapshot values shown for "changed" lines. The NULL placeholders
@@ -30,6 +30,7 @@ const PREV_COLS = {
   PayeeName: 'text',
   Memo: 'text',
   ClassName: 'text',
+  SplitAccount: 'text',
   Debit: 'numeric',
   Credit: 'numeric',
 };
@@ -73,7 +74,7 @@ async function handleOverview(groupId) {
   );
   const { rows: snapshots } = await query(
     `SELECT SnapshotId, QBOId, TO_CHAR(Period, 'YYYY-MM') AS month, PulledAt, LineCount, TotalDebit, TotalCredit,
-            ContentHash,
+            ContentHash, Source,
             LAG(ContentHash) OVER w AS PrevContentHash,
             ROW_NUMBER() OVER (PARTITION BY QBOId, Period ORDER BY PulledAt DESC) AS RecencyRank
      FROM CtrlSnapshots
@@ -97,6 +98,7 @@ async function handleOverview(groupId) {
       month: s.month,
       pulledAt: s.pulledat,
       lineCount: s.linecount,
+      source: s.source,
       totalDebit: Number(s.totaldebit),
       totalCredit: Number(s.totalcredit),
       isLatest: Number(s.recencyrank) === 1,
@@ -144,7 +146,7 @@ function parseLineParams(qs) {
 async function resolveSnapshots(groupId, p) {
   if (p.snapshotId) {
     const { rows } = await query(
-      `SELECT SnapshotId, PulledAt, TO_CHAR(Period, 'YYYY-MM') AS month FROM CtrlSnapshots
+      `SELECT SnapshotId, PulledAt, Source, TO_CHAR(Period, 'YYYY-MM') AS month FROM CtrlSnapshots
        WHERE SnapshotId = $1 AND GroupId = $2 AND QBOId = $3`,
       [p.snapshotId, groupId, p.qboId]
     );
@@ -153,7 +155,7 @@ async function resolveSnapshots(groupId, p) {
   }
 
   const { rows } = await query(
-    `SELECT DISTINCT ON (Period) SnapshotId, PulledAt, TO_CHAR(Period, 'YYYY-MM') AS month
+    `SELECT DISTINCT ON (Period) SnapshotId, PulledAt, Source, TO_CHAR(Period, 'YYYY-MM') AS month
      FROM CtrlSnapshots
      WHERE GroupId = $1 AND QBOId = $2 AND Period BETWEEN $3 AND $4
      ORDER BY Period, PulledAt DESC`,
@@ -165,7 +167,7 @@ async function resolveSnapshots(groupId, p) {
 
 async function previousSnapshot(groupId, p, snapshot) {
   const { rows } = await query(
-    `SELECT SnapshotId, PulledAt FROM CtrlSnapshots
+    `SELECT SnapshotId, PulledAt, Source FROM CtrlSnapshots
      WHERE GroupId = $1 AND QBOId = $2 AND Period = $3 AND PulledAt < $4
      ORDER BY PulledAt DESC LIMIT 1`,
     [groupId, p.qboId, `${p.fromMonth}-01`, snapshot.pulledat]
@@ -209,8 +211,8 @@ async function handleLines(groupId, qs) {
   const { current, previous } = await resolveSnapshots(groupId, p);
 
   const base = {
-    snapshots: current.map((s) => ({ snapshotId: s.snapshotid, month: s.month, pulledAt: s.pulledat })),
-    previousSnapshot: previous ? { snapshotId: previous.snapshotid, pulledAt: previous.pulledat } : null,
+    snapshots: current.map((s) => ({ snapshotId: s.snapshotid, month: s.month, pulledAt: s.pulledat, source: s.source })),
+    previousSnapshot: previous ? { snapshotId: previous.snapshotid, pulledAt: previous.pulledat, source: previous.source } : null,
   };
   if (!current.length) {
     return json(200, { ...base, lines: [], total: 0, totals: { debit: 0, credit: 0 }, changeCounts: null });
@@ -270,6 +272,7 @@ async function handleLines(groupId, qs) {
       accountCode: r.accountcode,
       accountName: r.accountname,
       className: r.classname,
+      splitAccount: r.splitaccount,
       debit: Number(r.debit),
       credit: Number(r.credit),
       amount: Number(r.amount),
@@ -281,6 +284,7 @@ async function handleLines(groupId, qs) {
               payeeName: r.prevpayeename,
               memo: r.prevmemo,
               className: r.prevclassname,
+              splitAccount: r.prevsplitaccount,
               debit: Number(r.prevdebit),
               credit: Number(r.prevcredit),
             }

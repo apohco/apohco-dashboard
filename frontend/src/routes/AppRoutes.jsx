@@ -18,6 +18,7 @@ import RequireControllerOwner from '../components/auth/RequireControllerOwner';
 import ControllerOverview from '../pages/Controller/ControllerOverview';
 import LedgerBrowser from '../pages/Controller/LedgerBrowser';
 import EntitiesSetup from '../pages/Controller/EntitiesSetup';
+import GlUpload from '../pages/Controller/GlUpload';
 
 export default function AppRoutes() {
   return (
@@ -42,6 +43,7 @@ export default function AppRoutes() {
             <Route path="controller" element={<ControllerOverview />} />
             <Route path="controller/ledger" element={<LedgerBrowser />} />
             <Route path="controller/entities" element={<EntitiesSetup />} />
+            <Route path="controller/upload" element={<GlUpload />} />
           </Route>
           <Route path="*" element={<Navigate to="/financial/profit-and-loss" replace />} />
         </Route>

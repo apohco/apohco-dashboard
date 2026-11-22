@@ -274,4 +274,15 @@ function parseTransactionFile(buffer, fileExtension, knownClassifications = {}) 
   };
 }
 
-module.exports = { parseTransactionFile, VALID_CLASSIFICATIONS };
+// readRowArrays: the raw sheet as an array of row arrays (no header
+// detection), for callers that do their own column mapping.
+function readRowArrays(buffer, fileExtension) {
+  if (fileExtension === 'csv') {
+    return parseCsv(buffer, { columns: false, skip_empty_lines: false, trim: true, bom: true, relax_column_count: true });
+  }
+  const workbook = XLSX.read(buffer, { type: 'buffer' });
+  const sheet = workbook.Sheets[workbook.SheetNames[0]];
+  return XLSX.utils.sheet_to_json(sheet, { header: 1, raw: false, defval: '', blankrows: true });
+}
+
+module.exports = { parseTransactionFile, readRowArrays, parseDate, parseNumber, VALID_CLASSIFICATIONS };

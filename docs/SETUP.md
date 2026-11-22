@@ -334,3 +334,34 @@ A month that fails three times is marked Failed (the message lands in the
 dead-letter queue); start the pull again once the cause is fixed. If a
 file shows **Last renewed** in amber on the Overview, its QBO connection
 needs reconnecting in Settings → QBO API Setup.
+
+### 9.5 Uploading a General Ledger file (no API connection needed)
+
+Deploy: `npm run db:migrate` applies `009_controller_gl_uploads.sql`
+(`CtrlUploads`, plus `Source`/`UploadId` on `CtrlSnapshots` and
+`SplitAccount` on `CtrlLedgerLines`), and `sam deploy` adds the
+`ctrlGlUpload` function (`/api/controller/uploads...`). No new environment
+variables or buckets: files are staged under `controller-uploads/` in the
+existing uploads bucket and deleted after import.
+
+**Controller → Upload GL**:
+1. Pick the QBO file, choose the CSV/XLSX export, click **Upload and match
+   columns**. The header row is found automatically (title rows above it
+   are skipped) and each column is matched by its header, in any order:
+   Distribution account, Transaction date, Transaction type, Num, Name,
+   Description, Split, Amount (or Debit/Credit), Class.
+2. Check the mapping and fix any column with its dropdown. A file with
+   the same columns as an earlier import from that QBO file reuses that
+   import's mapping.
+3. **Amount** in QuickBooks' GL export is positive when it increases the
+   account, so each account's type (from Chart of Accounts) decides debit
+   or credit. Accounts the dashboard hasn't classified are listed with a
+   suggested type to confirm. The debit/credit total check flags a wrong
+   setting on a full GL export.
+4. Choose the months and **Import**. Each month becomes a new snapshot
+   (marked as uploaded) beside any earlier pulls or uploads; nothing is
+   written to QuickBooks or to the dashboard's report data.
+
+Uploaded lines carry no QuickBooks transaction id, so comparing an upload
+with a later API pull of the same month shows most lines as changed;
+compare uploads with uploads, and pulls with pulls.

@@ -108,7 +108,7 @@ async function getGeneralLedgerReport(realmId, accessToken, startDate, endDate) 
   const params = new URLSearchParams({
     start_date: startDate,
     end_date: endDate,
-    columns: 'tx_date,txn_type,doc_num,name,memo,klass_name,debt_amt,credit_amt',
+    columns: 'tx_date,txn_type,doc_num,name,memo,split_acc,klass_name,debt_amt,credit_amt',
     accounting_method: 'Accrual',
   });
   return apiGet(realmId, `/reports/GeneralLedger?${params.toString()}`, accessToken);
@@ -183,6 +183,7 @@ function flattenGeneralLedgerReport(report, accountLookup) {
           accountCode: currentAccount.code,
           accountName: currentAccount.name,
           className: get('klass_name') || null,
+          splitAccount: get('split_acc') || null,
           debit,
           credit,
           amount: debit - credit,

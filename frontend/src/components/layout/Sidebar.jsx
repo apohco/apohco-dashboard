@@ -20,6 +20,7 @@ import FactCheckOutlinedIcon from '@mui/icons-material/FactCheckOutlined';
 import DashboardOutlinedIcon from '@mui/icons-material/DashboardOutlined';
 import ListAltOutlinedIcon from '@mui/icons-material/ListAltOutlined';
 import ApartmentOutlinedIcon from '@mui/icons-material/ApartmentOutlined';
+import UploadFileOutlinedIcon from '@mui/icons-material/UploadFileOutlined';
 import { useAuth } from '../../context/AuthContext';
 
 export const SIDEBAR_WIDTH = 240;
@@ -34,6 +35,7 @@ const financialItems = [
 const controllerItems = [
   { label: 'Overview', path: '/controller', icon: <DashboardOutlinedIcon fontSize="small" /> },
   { label: 'Ledger Browser', path: '/controller/ledger', icon: <ListAltOutlinedIcon fontSize="small" /> },
+  { label: 'Upload GL', path: '/controller/upload', icon: <UploadFileOutlinedIcon fontSize="small" /> },
   { label: 'Entities', path: '/controller/entities', icon: <ApartmentOutlinedIcon fontSize="small" /> },
 ];
 

@@ -19,7 +19,7 @@ const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 const LINE_COLUMNS = [
   'GroupId', 'SnapshotId', 'QBOId', 'Fingerprint', 'ContentHash', 'TxnDate', 'TxnType', 'DocNum',
   'QBOTxnId', 'PayeeName', 'PayeeQBOId', 'Memo', 'AccountCode', 'AccountName', 'ClassName',
-  'QBOClassId', 'Debit', 'Credit', 'Amount',
+  'QBOClassId', 'Debit', 'Credit', 'Amount', 'SplitAccount',
 ];
 
 // A short, token-free description of an error. axios errors carry the
@@ -101,6 +101,7 @@ async function pullMonth(task) {
         payeeName: row.payeeName,
         payeeQBOId: row.payeeQBOId,
         memo: row.description,
+        splitAccount: row.splitAccount,
         accountCode: row.accountCode,
         accountName: row.accountName,
         className: row.className,
@@ -144,7 +145,7 @@ async function pullMonth(task) {
         lines.map((l) => [
           task.groupid, snapshotId, qbo.qboid, l.fingerprint, l.contentHash, l.txnDate, l.txnType,
           l.docNum, l.qboTxnId, l.payeeName, l.payeeQBOId, l.memo, l.accountCode, l.accountName,
-          l.className, l.qboClassId, l.debit, l.credit, l.amount,
+          l.className, l.qboClassId, l.debit, l.credit, l.amount, l.splitAccount,
         ])
       );
     }

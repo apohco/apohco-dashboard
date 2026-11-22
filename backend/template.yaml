@@ -676,6 +676,58 @@ Resources:
             Path: /api/controller/lines
             Method: get
 
+  # GL file uploads (CSV/XLSX) stored as Controller snapshots. Reads the
+  # file from the uploads bucket; never writes to QuickBooks or to the
+  # dashboard's own tables.
+  CtrlGlUploadFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: ctrlGlUpload
+      Handler: src/functions/controller/ctrlGlUpload/index.handler
+      # API Gateway stops waiting at 29s; the extra memory is CPU for
+      # parsing large spreadsheets.
+      Timeout: 30
+      MemorySize: 1024
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: secretsmanager:GetSecretValue
+              Resource:
+                - !Ref DbCredentialsSecretArn
+                - !Ref AppSecretsArn
+        - VPCAccessPolicy: {}
+        - Statement:
+            - Effect: Allow
+              Action:
+                - s3:PutObject
+                - s3:GetObject
+                - s3:DeleteObject
+              Resource: !Sub '${UploadsBucket.Arn}/controller-uploads/*'
+      Environment:
+        Variables:
+          COGNITO_USER_POOL_ID: !Ref ApohcoUserPool
+          COGNITO_CLIENT_ID: !Ref ApohcoUserPoolClient
+          UPLOADS_BUCKET: !Ref UploadsBucket
+      Events:
+        Collection:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/controller/uploads
+            Method: any
+        Analyze:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/controller/uploads/{uploadId}/analyze
+            Method: post
+        Import:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/controller/uploads/{uploadId}/import
+            Method: post
+
   ManageCtrlEntitiesFunction:
     Type: AWS::Serverless::Function
     Properties:

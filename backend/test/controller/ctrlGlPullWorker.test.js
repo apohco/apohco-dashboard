@@ -61,7 +61,7 @@ describe('ctrlGlPullWorker success', () => {
     expect(snap[1].slice(0, 7)).toEqual(['group-1', 'qbo-1', '2026-10-01', 'task-1', 3, '142.10', '42.10']);
 
     const lines = client.query.mock.calls.find(([sql]) => /INSERT INTO CtrlLedgerLines/.test(sql));
-    expect(lines[1]).toHaveLength(3 * 19);
+    expect(lines[1]).toHaveLength(3 * 20);
     // Payee and resolved class id are stored on the line.
     expect(lines[1]).toEqual(expect.arrayContaining(['Kroger', 'Amazon', 'class-lebanon']));
 

@@ -53,6 +53,7 @@ export function describeChange(line) {
   if ((prev.className || '') !== (line.className || '')) diffs.push(`class was ${prev.className || '(none)'}`);
   if ((prev.payeeName || '') !== (line.payeeName || '')) diffs.push(`payee was ${prev.payeeName || '(none)'}`);
   if ((prev.memo || '') !== (line.memo || '')) diffs.push(`memo was "${prev.memo || ''}"`);
+  if ((prev.splitAccount || '') !== (line.splitAccount || '')) diffs.push(`split was ${prev.splitAccount || '(none)'}`);
   return diffs.join('; ');
 }
 
@@ -264,6 +265,7 @@ export default function LedgerBrowser() {
                   <TableCell>Payee</TableCell>
                   <TableCell>Memo</TableCell>
                   <TableCell>Account</TableCell>
+                  <TableCell>Split</TableCell>
                   <TableCell>Class</TableCell>
                   <TableCell align="right">Debit</TableCell>
                   <TableCell align="right">Credit</TableCell>
@@ -282,6 +284,7 @@ export default function LedgerBrowser() {
                     <TableCell>{l.payeeName}</TableCell>
                     <TableCell sx={{ maxWidth: 260 }}>{l.memo}</TableCell>
                     <TableCell>{[l.accountCode, l.accountName].filter(Boolean).join(' ')}</TableCell>
+                    <TableCell>{l.splitAccount}</TableCell>
                     <TableCell>{l.className || <Box component="span" sx={{ color: 'text.disabled' }}>—</Box>}</TableCell>
                     <TableCell align="right">{l.debit ? formatCurrency(l.debit) : ''}</TableCell>
                     <TableCell align="right">{l.credit ? formatCurrency(l.credit) : ''}</TableCell>

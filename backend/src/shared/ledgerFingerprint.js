@@ -14,6 +14,7 @@ const crypto = require('crypto');
 //   content (ContentHash): what the line currently says. Date, doc number,
 //   payee, memo, account name, class, debit and credit. Comparing content
 //   hashes for the same fingerprint across two snapshots shows what changed.
+//   Split (the other side of the entry) is included when the source has it.
 //
 // When QBO gives no transaction id for a row, the identity falls back to
 // date + doc number, which is weaker (an edited date then looks like a new
@@ -41,6 +42,7 @@ function contentHash(line) {
     text(line.memo),
     text(line.accountName),
     text(line.className),
+    text(line.splitAccount),
     money(line.debit),
     money(line.credit),
   ]);

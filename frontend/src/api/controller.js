@@ -1,3 +1,4 @@
+import axios from 'axios';
 import apiClient from './client';
 
 // Controller module API. Every route requires SoftwareAdmin + the
@@ -31,3 +32,23 @@ export const updateControllerEntity = (groupId, entityId, entity) =>
 
 export const deleteControllerEntity = (groupId, entityId) =>
   apiClient.delete(`/api/controller/entities/${entityId}`, { params: { groupId } });
+
+// GL file uploads. Flow: createControllerUpload -> PUT the file to the
+// returned uploadUrl -> analyzeControllerUpload (as often as the mapping
+// changes) -> importControllerUpload.
+export const createControllerUpload = (groupId, qboId, fileName) =>
+  apiClient.post('/api/controller/uploads', { groupId, qboId, fileName }).then((r) => r.data);
+
+export const putControllerUploadFile = (uploadUrl, file, contentType) =>
+  axios.put(uploadUrl, file, { headers: { 'Content-Type': contentType } });
+
+// options: { headerRow?, mapping?, amountConvention?, classifications? }
+export const analyzeControllerUpload = (groupId, uploadId, options = {}) =>
+  apiClient.post(`/api/controller/uploads/${uploadId}/analyze`, { groupId, ...options }).then((r) => r.data);
+
+// options: { headerRow, mapping, amountConvention, classifications, fromMonth, toMonth }
+export const importControllerUpload = (groupId, uploadId, options) =>
+  apiClient.post(`/api/controller/uploads/${uploadId}/import`, { groupId, ...options }).then((r) => r.data);
+
+export const listControllerUploads = (groupId) =>
+  apiClient.get('/api/controller/uploads', { params: { groupId } }).then((r) => r.data);

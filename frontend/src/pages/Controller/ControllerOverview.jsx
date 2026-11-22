@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { Link as RouterLink, useNavigate } from 'react-router-dom';
 import {
   Alert,
   Box,
@@ -7,6 +7,7 @@ import {
   Chip,
   CircularProgress,
   LinearProgress,
+  Link,
   MenuItem,
   Paper,
   Select,
@@ -111,6 +112,15 @@ function PullForm({ qbos, groupId, disabled, onStarted }) {
         Reads the General Ledger one month at a time and stores it as a new snapshot. Earlier pulls are
         kept, and nothing is ever written to QuickBooks.
       </Typography>
+      {pullable.length === 0 && (
+        <Alert severity="info" sx={{ mb: 2 }}>
+          No QBO file is connected to the QuickBooks API yet.{' '}
+          <Link component={RouterLink} to="/controller/upload">
+            Upload a General Ledger export
+          </Link>{' '}
+          instead.
+        </Alert>
+      )}
       <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap', alignItems: 'center' }}>
         <Select
           size="small"
@@ -258,8 +268,8 @@ export default function ControllerOverview() {
             Stored months
           </Typography>
           <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-            Line count of the latest pull. Click a month to browse it. A dot means the latest pull
-            differs from the one before it.
+            Line count of the latest pull or upload. Click a month to browse it. A dot means the latest
+            snapshot differs from the one before it.
           </Typography>
           <TableContainer component={Paper} variant="outlined" sx={{ mb: 3 }}>
             <Table size="small" stickyHeader>
@@ -300,7 +310,7 @@ export default function ControllerOverview() {
                             sx={{ cursor: 'pointer', '&:hover': { bgcolor: 'action.hover' } }}
                           >
                             <Tooltip
-                              title={`${cell.pulls} pull${cell.pulls === 1 ? '' : 's'}, latest ${new Date(s.pulledAt).toLocaleString()}`}
+                              title={`${cell.pulls} snapshot${cell.pulls === 1 ? '' : 's'}, latest ${s.source === 'Upload' ? 'uploaded' : 'pulled'} ${new Date(s.pulledAt).toLocaleString()}`}
                             >
                               <span>
                                 {s.lineCount.toLocaleString()}
