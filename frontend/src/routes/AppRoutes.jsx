@@ -19,6 +19,8 @@ import ControllerOverview from '../pages/Controller/ControllerOverview';
 import LedgerBrowser from '../pages/Controller/LedgerBrowser';
 import EntitiesSetup from '../pages/Controller/EntitiesSetup';
 import GlUpload from '../pages/Controller/GlUpload';
+import ReviewQueue from '../pages/Controller/ReviewQueue';
+import Vendors from '../pages/Controller/Vendors';
 
 export default function AppRoutes() {
   return (
@@ -44,6 +46,8 @@ export default function AppRoutes() {
             <Route path="controller/ledger" element={<LedgerBrowser />} />
             <Route path="controller/entities" element={<EntitiesSetup />} />
             <Route path="controller/upload" element={<GlUpload />} />
+            <Route path="controller/review" element={<ReviewQueue />} />
+            <Route path="controller/vendors" element={<Vendors />} />
           </Route>
           <Route path="*" element={<Navigate to="/financial/profit-and-loss" replace />} />
         </Route>

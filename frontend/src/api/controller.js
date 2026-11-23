@@ -52,3 +52,34 @@ export const importControllerUpload = (groupId, uploadId, options) =>
 
 export const listControllerUploads = (groupId) =>
   apiClient.get('/api/controller/uploads', { params: { groupId } }).then((r) => r.data);
+
+// Review (Phase 2).
+export const getReviewSettings = (groupId) =>
+  apiClient.get('/api/controller/review/settings', { params: { groupId } }).then((r) => r.data);
+
+export const saveReviewSettings = (groupId, settings) =>
+  apiClient.put('/api/controller/review/settings', { groupId, ...settings }).then((r) => r.data);
+
+export const listReviewRuns = (groupId, qboId, month) =>
+  apiClient.get('/api/controller/review/runs', { params: { groupId, qboId, month } }).then((r) => r.data);
+
+export const startReviewRun = (groupId, qboId, month) =>
+  apiClient.post('/api/controller/review/runs', { groupId, qboId, month }).then((r) => r.data);
+
+// params: { runId, status?, reviewState?, accountType?, account?, vendor?, entityId?, search?, limit?, offset? }
+export const listReviewLines = (groupId, params) =>
+  apiClient.get('/api/controller/review/lines', { params: { groupId, ...params } }).then((r) => r.data);
+
+// body: { runId, action, lineIds | (filter + expectedCount), entityId?, allocations?, note? }
+export const saveReviewDecisions = (groupId, body) =>
+  apiClient.post('/api/controller/review/decisions', { groupId, ...body }).then((r) => r.data);
+
+// Vendors.
+export const listVendors = (groupId) =>
+  apiClient.get('/api/controller/vendors', { params: { groupId } }).then((r) => r.data);
+
+export const updateVendor = (groupId, vendorId, body) =>
+  apiClient.put(`/api/controller/vendors/${vendorId}`, { groupId, ...body }).then((r) => r.data);
+
+export const mergeVendor = (groupId, vendorId, fromVendorId) =>
+  apiClient.post(`/api/controller/vendors/${vendorId}/merge`, { groupId, fromVendorId }).then((r) => r.data);

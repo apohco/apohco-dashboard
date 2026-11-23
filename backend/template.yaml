@@ -728,6 +728,69 @@ Resources:
             Path: /api/controller/uploads/{uploadId}/import
             Method: post
 
+  # Phase 2: review runs, the review queue and decisions (rules + history
+  # engine in shared/reviewEngine.js). Database only; no QuickBooks calls.
+  CtrlReviewFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: ctrlReview
+      Handler: src/functions/controller/ctrlReview/index.handler
+      MemorySize: 512
+      Policies: *lambdaPolicies
+      Environment: *cognitoAuthEnv
+      Events:
+        Settings:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/controller/review/settings
+            Method: any
+        Runs:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/controller/review/runs
+            Method: any
+        Lines:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/controller/review/lines
+            Method: get
+        Decisions:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/controller/review/decisions
+            Method: post
+
+  ManageCtrlVendorsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: manageCtrlVendors
+      Handler: src/functions/controller/manageCtrlVendors/index.handler
+      Policies: *lambdaPolicies
+      Environment: *cognitoAuthEnv
+      Events:
+        Collection:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/controller/vendors
+            Method: get
+        Item:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/controller/vendors/{vendorId}
+            Method: put
+        Merge:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/controller/vendors/{vendorId}/merge
+            Method: post
+
   ManageCtrlEntitiesFunction:
     Type: AWS::Serverless::Function
     Properties:
