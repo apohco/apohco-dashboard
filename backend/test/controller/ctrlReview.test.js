@@ -52,7 +52,7 @@ describe('helpers', () => {
     const { sql, params } = buildFilterSql(f, 4);
     expect(sql).toContain('s.Status = ANY($4::text[])');
     expect(sql).toContain('d.Fingerprint IS NULL');
-    expect(sql).toContain("COALESCE(m.Classification, 'Unknown') = ANY($5::text[])");
+    expect(sql).toContain("COALESCE(m.Classification, ua.Classification, 'Unknown') = ANY($5::text[])");
     expect(params).toEqual([['Confirmed', 'Conflict'], ['Expense', 'Unknown'], '%kro\\%%', '%gloves%']);
     expect(() => parseFilters({ status: 'Bogus' })).toThrow(/status/);
     expect(() => parseFilters({ accountType: 'COGS' })).toThrow(/accountType/);

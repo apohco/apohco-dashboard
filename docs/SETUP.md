@@ -365,3 +365,26 @@ existing uploads bucket and deleted after import.
 Uploaded lines carry no QuickBooks transaction id, so comparing an upload
 with a later API pull of the same month shows most lines as changed;
 compare uploads with uploads, and pulls with pulls.
+
+### 9.6 Review and vendors (Phase 2a)
+
+Deploy: `npm run db:migrate` applies `010_controller_review.sql` (review
+settings, vendors and aliases, versioned vendor rules, review runs,
+suggestions, decisions); `sam deploy` adds `ctrlReview`
+(`/api/controller/review/...`) and `manageCtrlVendors`
+(`/api/controller/vendors...`). No new environment variables.
+
+**Controller → Review**: pick a class-based file and a stored month, click
+**Run review**. Every line gets a status (Unclassified, Confirmed, Likely
+misclassified, Conflict, Needs evidence), a suggested entity and the
+reasons. Filter by status, open/decided, account type, account, vendor,
+entity or memo; approve, keep, set an entity or split a line; select all
+matching lines to decide in bulk (lines already decided and watch-mode
+vendors are skipped). **Settings** holds the confidence threshold (90% to
+start) and how many months of history the engine learns from.
+
+**Controller → Vendors**: one profile per payee (created on the first
+review), with a default entity, memo keywords, a written rule (versioned;
+used by the AI from Phase 3), watch mode, default split percentages, and
+merge. Account types come from the dashboard's Chart of Accounts, else
+from the types confirmed during GL upload.

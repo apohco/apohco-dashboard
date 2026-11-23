@@ -336,7 +336,7 @@ function buildFilterSql(f, start) {
   if (f.statuses.length) clauses.push(`s.Status = ANY(${p(f.statuses)}::text[])`);
   if (f.reviewState === 'open') clauses.push('d.Fingerprint IS NULL');
   if (f.reviewState === 'decided') clauses.push('d.Fingerprint IS NOT NULL');
-  if (f.accountTypes.length) clauses.push(`COALESCE(m.Classification, 'Unknown') = ANY(${p(f.accountTypes)}::text[])`);
+  if (f.accountTypes.length) clauses.push(`${ACCOUNT_TYPE_SQL} = ANY(${p(f.accountTypes)}::text[])`);
   if (f.account) {
     const x = p(likePattern(f.account));
     clauses.push(`(l.AccountCode ILIKE ${x} OR l.AccountName ILIKE ${x})`);
@@ -353,12 +353,24 @@ function buildFilterSql(f, start) {
   return { sql: clauses.map((c) => ` AND ${c}`).join(''), params };
 }
 
+// A line's account type: the dashboard's Chart of Accounts, else the type
+// Paul confirmed when uploading a GL for this file (CtrlUploads keeps
+// those per account, keyed like glUploadParser.accountKey).
+const ACCOUNT_TYPE_SQL = `COALESCE(m.Classification, ua.Classification, 'Unknown')`;
+
 // The queue's FROM clause. Parameters: $1 groupId, $2 runId, $3 qboId.
 const QUEUE_FROM = `
   FROM CtrlSuggestions s
   JOIN CtrlLedgerLines l ON l.LineId = s.LineId
   LEFT JOIN CtrlVendors v ON v.VendorId = s.VendorId
   LEFT JOIN ChartOfAccountsMappings m ON m.QBOId = l.QBOId AND m.AccountCode = l.AccountCode
+  LEFT JOIN LATERAL (
+    SELECT u.AccountClassifications ->> k.Key AS Classification
+    FROM (SELECT CASE WHEN COALESCE(l.AccountCode, '') <> '' THEN 'code:' || l.AccountCode
+                      ELSE 'name:' || lower(COALESCE(l.AccountName, '')) END AS Key) k
+    JOIN CtrlUploads u ON u.QBOId = l.QBOId AND u.Status = 'Imported' AND u.AccountClassifications ? k.Key
+    ORDER BY u.ImportedDate DESC LIMIT 1
+  ) ua ON m.Classification IS NULL
   LEFT JOIN (
     SELECT DISTINCT ON (Fingerprint) Fingerprint, Action, EntityId, Allocations, DecidedAt
     FROM CtrlDecisions WHERE GroupId = $1 AND QBOId = $3
@@ -393,7 +405,7 @@ async function handleLines(groupId, qs) {
     `SELECT s.LineId, s.Fingerprint, s.VendorId, s.CurrentEntityId, s.SuggestedEntityId, s.Confidence, s.Status, s.Source, s.Reasons,
             TO_CHAR(l.TxnDate, 'YYYY-MM-DD') AS TxnDate, l.TxnType, l.DocNum, l.PayeeName, l.Memo, l.AccountCode, l.AccountName,
             l.ClassName, l.SplitAccount, l.Debit, l.Credit, l.Amount,
-            v.DisplayName AS VendorName, v.WatchMode, v.SplitTemplate, COALESCE(m.Classification, 'Unknown') AS AccountType,
+            v.DisplayName AS VendorName, v.WatchMode, v.SplitTemplate, ${ACCOUNT_TYPE_SQL} AS AccountType,
             d.Action AS DecisionAction, d.EntityId AS DecisionEntityId, d.Allocations, d.DecidedAt
      ${QUEUE_FROM}${where.sql}
      ORDER BY ${STATUS_ORDER}, ABS(l.Amount) DESC, l.TxnDate, s.LineId

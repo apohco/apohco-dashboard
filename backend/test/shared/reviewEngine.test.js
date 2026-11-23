@@ -2,6 +2,7 @@ const {
   payeeKey,
   containsTerm,
   buildEntityResolver,
+  buildEntityTerms,
   scoreTally,
   buildHistory,
   historySuggestion,
@@ -159,6 +160,21 @@ describe('rules and keywords', () => {
   test('an entity keyword in the memo is used when there is no rule', () => {
     const [r] = classify([line({ vendorId: 'v-other', memo: 'Delivery to Main St office', className: 'Lebanon' })]);
     expect(r).toMatchObject({ status: 'Confirmed', source: 'Keyword', suggestedEntityId: LEB, confidence: 0.92 });
+  });
+
+  test('terms shared by several entities are ignored, and the longest match wins', () => {
+    const entities = [
+      { entityId: 'west', entityName: 'Westside', aliases: ['Petr Vaughan DDS', 'LLC'], keywords: [] },
+      { entityId: 'leb', entityName: 'Lebanon', aliases: ['Lebanon Petr Vaughan DDS', 'LLC'], keywords: ['600 Columbus Ave'] },
+    ];
+    expect(buildEntityTerms(entities).map((t) => t.term)).not.toContain('LLC');
+    const [r] = classifyLines({ lines: [line({ vendorId: 'v-x', memo: 'Invoice to Lebanon Petr Vaughan DDS LLC', className: 'Westside' })], entities });
+    expect(r).toMatchObject({ source: 'Keyword', suggestedEntityId: 'leb', status: 'LikelyMisclassified' });
+  });
+
+  test('an entity name alone in the memo is a medium hint, not enough to flag a line', () => {
+    const [r] = classify([line({ vendorId: 'v-other', memo: 'Lunch for Milford staff', className: 'Lebanon' })]);
+    expect(r).toMatchObject({ source: 'Keyword', suggestedEntityId: MIL, confidence: 0.85, status: 'NeedsEvidence' });
   });
 
   test('keywords for two entities in one memo give no keyword signal', () => {

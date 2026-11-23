@@ -21,7 +21,11 @@
 
 const RULE_KEYWORD_CONFIDENCE = 0.97;
 const RULE_DEFAULT_CONFIDENCE = 0.95;
+// An entity's keywords/aliases are deliberate; its bare name (e.g. the
+// management company's own name in a memo) is a weaker hint that alone
+// stays below the default threshold.
 const ENTITY_KEYWORD_CONFIDENCE = 0.92;
+const ENTITY_NAME_CONFIDENCE = 0.85;
 const DECISION_WEIGHT = 3;
 // History for the vendor + account is preferred once it has this much
 // weight; below that the vendor's history across all accounts is used.
@@ -152,17 +156,43 @@ function ruleSuggestion(rule, line) {
   return null;
 }
 
-// An entity's own aliases/keywords in the memo. Ambiguous (two entities)
-// means no signal.
+// Searchable terms per entity: its keywords, aliases and name. A term
+// listed for more than one entity ("LLC") can't tell them apart, so it is
+// dropped.
+function buildEntityTerms(entities) {
+  const owners = new Map();
+  const terms = [];
+  for (const e of entities) {
+    const add = (term, kind) => {
+      const t = String(term ?? '').trim();
+      if (t.length < MIN_TERM_LENGTH) return;
+      const key = t.toLowerCase();
+      if (!owners.has(key)) owners.set(key, new Set());
+      owners.get(key).add(e.entityId);
+      terms.push({ entityId: e.entityId, term: t, key, kind });
+    };
+    for (const k of e.keywords || []) add(k, 'keyword');
+    for (const a of e.aliases || []) add(a, 'alias');
+    add(e.entityName, 'name');
+  }
+  return terms.filter((t) => owners.get(t.key).size === 1);
+}
+
+// An entity's terms found in the memo. When one entity's match sits inside
+// a longer match for another ("Petr Vaughan DDS" inside "Lebanon Petr
+// Vaughan DDS"), the longer one wins. Two entities left means no signal.
 function entityKeywordSuggestion(entityTerms, line) {
   if (!line.memo) return null;
-  const hits = new Map();
-  for (const { entityId, term } of entityTerms) {
-    if (!hits.has(entityId) && containsTerm(line.memo, term)) hits.set(entityId, term);
-  }
-  if (hits.size !== 1) return null;
-  const [[entityId, term]] = [...hits];
-  return { entityId, confidence: ENTITY_KEYWORD_CONFIDENCE, term };
+  const hits = entityTerms.filter((t) => containsTerm(line.memo, t.term));
+  const kept = hits.filter((h) => !hits.some((o) => o.entityId !== h.entityId && o.key.length > h.key.length && o.key.includes(h.key)));
+  const entityIds = new Set(kept.map((h) => h.entityId));
+  if (entityIds.size !== 1) return null;
+  const best = kept.find((h) => h.kind !== 'name') || kept[0];
+  return {
+    entityId: best.entityId,
+    confidence: best.kind === 'name' ? ENTITY_NAME_CONFIDENCE : ENTITY_KEYWORD_CONFIDENCE,
+    term: best.term,
+  };
 }
 
 // Classifies every line.
@@ -181,9 +211,7 @@ function classifyLines({ lines, entities, rules = new Map(), history = new Map()
   const resolve = buildEntityResolver(entities);
   const names = new Map(entities.map((e) => [e.entityId, e.entityName]));
   const nameOf = (id) => names.get(id) || 'an unknown entity';
-  const entityTerms = entities.flatMap((e) =>
-    [e.entityName, ...(e.aliases || []), ...(e.keywords || [])].filter(Boolean).map((term) => ({ entityId: e.entityId, term }))
-  );
+  const entityTerms = buildEntityTerms(entities);
   const level = (c) => (c >= threshold ? 'High' : c >= mediumThreshold ? 'Medium' : 'Low');
   const pct = (c) => `${Math.round(c * 100)}%`;
 
@@ -294,6 +322,7 @@ module.exports = {
   payeeKey,
   containsTerm,
   buildEntityResolver,
+  buildEntityTerms,
   scoreTally,
   buildHistory,
   historySuggestion,
