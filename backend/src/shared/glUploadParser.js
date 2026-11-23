@@ -182,7 +182,7 @@ function parseGlDate(value) {
   return date.getUTCFullYear() === y && date.getUTCMonth() === m - 1 && date.getUTCDate() === d ? iso : null;
 }
 
-const accountKey = (code, name) => (code ? `code:${code}` : `name:${String(name || '').toLowerCase()}`);
+const { accountKey } = require('./accountKey');
 const round2 = (n) => Math.round(n * 100) / 100;
 
 // Rows QuickBooks puts between transactions: totals, opening balances and

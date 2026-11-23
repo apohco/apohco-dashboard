@@ -70,9 +70,19 @@ export const startReviewRun = (groupId, qboId, month) =>
 export const listReviewLines = (groupId, params) =>
   apiClient.get('/api/controller/review/lines', { params: { groupId, ...params } }).then((r) => r.data);
 
-// body: { runId, action, lineIds | (filter + expectedCount), entityId?, allocations?, note? }
+// body: { runId, action, lineIds | (filter + expectedCount), entityId?, allocations?,
+//         account?: { code, name }, counterpartyEntityId?, note? }
 export const saveReviewDecisions = (groupId, body) =>
   apiClient.post('/api/controller/review/decisions', { groupId, ...body }).then((r) => r.data);
+
+// A file's accounts (for Reclassify) and its Due To/From accounts:
+// { ownerEntityId, accounts: [{ code, name, type }], dueToFrom: [{ entityId, account }] }
+export const getReviewAccounts = (groupId, qboId) =>
+  apiClient.get('/api/controller/review/accounts', { params: { groupId, qboId } }).then((r) => r.data);
+
+// account: { code, name }, or null to clear.
+export const saveDueToFromAccount = (groupId, qboId, counterpartyEntityId, account) =>
+  apiClient.put('/api/controller/review/due-to-from', { groupId, qboId, counterpartyEntityId, account }).then((r) => r.data);
 
 // Vendors.
 export const listVendors = (groupId) =>

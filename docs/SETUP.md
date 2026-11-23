@@ -388,3 +388,34 @@ review), with a default entity, memo keywords, a written rule (versioned;
 used by the AI from Phase 3), watch mode, default split percentages, and
 merge. Account types come from the dashboard's Chart of Accounts, else
 from the types confirmed during GL upload.
+
+### 9.7 Reviewing practice files (Phase 2a.1)
+
+Deploy: `npm run db:migrate` applies `011_controller_account_review.sql`
+(review kind on runs, suggested account on suggestions, target account and
+other entity on decisions, and the `CtrlDueToFromAccounts` setting);
+`sam deploy` adds `GET /api/controller/review/accounts` and
+`PUT /api/controller/review/due-to-from` to `ctrlReview`.
+
+**Controller → Review** now lists every QBO file. A class-based file gets
+the class review above; any other file (each dental home's own file) gets an
+**account review**: is each line in the right account, or does it belong to
+another entity?
+
+- **Reclassify…** moves lines to another account in the same file.
+- **Due To/From…** marks lines as belonging to another entity. The line
+  moves to this file's Due To/From account for that entity: the saved
+  default, else the account named "Due from/to <entity>" (found by name,
+  using the entity's name, aliases and keywords). Choosing a different
+  account uses it for those lines; tick **Make this the default** to keep
+  it. **Due To/From accounts** (next to the file picker) shows and edits
+  every entity's default for the file.
+- Suggestions: where this vendor's lines of the same account type went in
+  earlier months (decisions count 3x), and another entity named in the
+  memo. A line already in a "Due to/from <entity>" account counts as Due
+  To/From that entity. **Approve** records the suggested Keep, Reclassify
+  or Due To/From.
+
+Both actions also work on the management file. Decisions are only recorded
+here; nothing is written to QuickBooks. Phase 5 turns them into recommended
+adjusting entries.

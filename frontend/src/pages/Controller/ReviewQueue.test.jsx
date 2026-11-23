@@ -4,6 +4,8 @@ import userEvent from '@testing-library/user-event';
 
 vi.mock('../../api/controller', () => ({
   getControllerOverview: vi.fn(),
+  getReviewAccounts: vi.fn(),
+  saveDueToFromAccount: vi.fn(),
   getReviewSettings: vi.fn(),
   listReviewLines: vi.fn(),
   listReviewRuns: vi.fn(),
@@ -15,13 +17,15 @@ vi.mock('../../api/settings', () => ({ listGroups: vi.fn() }));
 
 import {
   getControllerOverview,
+  getReviewAccounts,
   listReviewLines,
+  saveDueToFromAccount,
   listReviewRuns,
   saveReviewDecisions,
   startReviewRun,
 } from '../../api/controller';
 import { listGroups } from '../../api/settings';
-import ReviewQueue, { confidenceLabel, describeDecision, splitFromTemplate } from './ReviewQueue';
+import ReviewQueue, { confidenceLabel, describeDecision, describeSuggestion, splitFromTemplate } from './ReviewQueue';
 
 const ENTITIES = [
   { entityId: 'leb', entityName: 'Lebanon' },
@@ -48,6 +52,16 @@ const linesResponse = (lines, total = lines.length) => ({
   totalAmount: 5100,
   lines,
 });
+
+const ACCOUNTS = {
+  ownerEntityId: 'mil',
+  accounts: [
+    { code: '1500', name: 'Due From Lebanon', type: 'Asset' },
+    { code: '6100', name: 'Supplies', type: 'Expense' },
+    { code: '6150', name: 'Breakroom', type: 'Expense' },
+  ],
+  dueToFrom: [{ entityId: 'leb', account: { code: '1500', name: 'Due From Lebanon' } }],
+};
 
 describe('helpers', () => {
   test('confidenceLabel', () => {
@@ -86,6 +100,7 @@ describe('ReviewQueue page', () => {
       runs: [{ runId: 'run-1', runDate: '2026-11-23T10:00:00Z', lineCount: 251, isStale: false }],
     });
     saveReviewDecisions.mockResolvedValue({ decided: 1, skipped: { alreadyDecided: 0, watchMode: 0, nothingToApply: 0 } });
+    getReviewAccounts.mockResolvedValue(ACCOUNTS);
   });
 
   test('loads the latest run for the class-based file, filtered to open Expense lines', async () => {
@@ -163,5 +178,158 @@ describe('ReviewQueue page', () => {
     expect(startReviewRun).toHaveBeenCalledWith('g1', 'mgmt', expect.any(String));
     await waitFor(() => expect(listReviewLines).toHaveBeenCalled());
     expect(await screen.findByText('Reviewed 251 lines.')).toBeInTheDocument();
+  });
+});
+
+describe('account review helpers', () => {
+  const name = (id) => ({ leb: 'Lebanon', mil: 'Milford' })[id];
+  test('describeDecision for Reclassify, Due To/From and Keep', () => {
+    expect(describeDecision({ action: 'Reclassify', targetAccount: { code: '6150', name: 'Breakroom' } }, name)).toBe('Reclassified to 6150 Breakroom');
+    expect(describeDecision({ action: 'DueToFrom', counterpartyEntityId: 'leb', targetAccount: { code: null, name: 'Due From Lebanon' } }, name)).toBe(
+      'Due To/From Lebanon (Due From Lebanon)'
+    );
+    expect(describeDecision({ action: 'Keep', entityId: null }, name)).toBe('Kept as is');
+  });
+
+  test('describeSuggestion', () => {
+    const l = { accountCode: '6100', accountName: 'Supplies' };
+    expect(describeSuggestion({ ...l, suggestedAction: 'Keep' }, name)).toBe('Keep in 6100 Supplies');
+    expect(describeSuggestion({ ...l, suggestedAction: 'Reclassify', suggestedAccount: { code: '6150', name: 'Breakroom' } }, name)).toBe('Reclassify to 6150 Breakroom');
+    expect(describeSuggestion({ ...l, suggestedAction: 'DueToFrom', suggestedEntityId: 'leb' }, name)).toBe('Due To/From Lebanon');
+    expect(describeSuggestion({ ...l, suggestedAction: null }, name)).toBe('—');
+  });
+});
+
+describe('account review of a file without classes', () => {
+  const accountLine = (over = {}) =>
+    line({
+      className: '', currentEntityId: 'mil', suggestedEntityId: null, suggestedAction: 'Reclassify',
+      suggestedAccount: { code: '6150', name: 'Breakroom' }, status: 'LikelyMisclassified', ...over,
+    });
+  const accountResponse = (lines) => ({ ...linesResponse(lines), run: { runId: 'run-2', reviewKind: 'Account', threshold: 0.9, mediumThreshold: 0.7 } });
+
+  beforeEach(() => {
+    listGroups.mockResolvedValue([{ groupid: 'g1', groupname: 'APOHCO' }]);
+    getControllerOverview.mockResolvedValue({ qbos: [{ qboId: 'mil-file', qboName: 'Milford', isClassBased: false }], snapshots: [] });
+    listReviewRuns.mockResolvedValue({ latestSnapshot: { snapshotId: 's2' }, runs: [{ runId: 'run-2', runDate: '2026-11-23T10:00:00Z', lineCount: 40, isStale: false }] });
+    getReviewAccounts.mockResolvedValue(ACCOUNTS);
+    saveReviewDecisions.mockResolvedValue({ decided: 1, skipped: { alreadyDecided: 0, watchMode: 0, nothingToApply: 0, noDueToFromAccount: 0 } });
+  });
+
+  test('shows account suggestions and account actions (no class or entity actions)', async () => {
+    const user = userEvent.setup();
+    listReviewLines.mockResolvedValue(accountResponse([accountLine()]));
+    render(<ReviewQueue />);
+    expect(await screen.findByText('Reclassify to 6150 Breakroom')).toBeInTheDocument();
+    expect(screen.getByRole('combobox', { name: 'QBO file' })).toHaveTextContent('Milford (account review)');
+    expect(screen.queryByText('Class now')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Set entity…' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Keep as is' })).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'More actions for l1' }));
+    expect(screen.queryByRole('menuitem', { name: 'Split…' })).not.toBeInTheDocument();
+    expect(screen.getByRole('menuitem', { name: 'Reclassify…' })).toBeInTheDocument();
+  });
+
+  test('reclassify one line to another account', async () => {
+    const user = userEvent.setup();
+    listReviewLines.mockResolvedValue(accountResponse([accountLine()]));
+    render(<ReviewQueue />);
+    await user.click(await screen.findByRole('button', { name: 'More actions for l1' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Reclassify…' }));
+    await user.click(screen.getByLabelText('Move to account'));
+    await user.click(screen.getByRole('option', { name: '6150 Breakroom' }));
+    await user.click(screen.getByRole('button', { name: 'Reclassify' }));
+    expect(saveReviewDecisions).toHaveBeenCalledWith('g1', {
+      runId: 'run-2', action: 'Reclassify', lineIds: ['l1'], account: { code: '6150', name: 'Breakroom' },
+    });
+  });
+
+  test("due to/from uses the entity's saved account (the file's own entity is not offered)", async () => {
+    const user = userEvent.setup();
+    listReviewLines.mockResolvedValue(accountResponse([accountLine()]));
+    render(<ReviewQueue />);
+    await user.click(await screen.findByRole('button', { name: 'More actions for l1' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Due To/From…' }));
+    await user.click(screen.getByRole('combobox', { name: 'Other entity' }));
+    expect(screen.queryByRole('option', { name: 'Milford' })).not.toBeInTheDocument();
+    await user.click(screen.getByRole('option', { name: 'Lebanon' }));
+    expect(screen.getByLabelText('Due To/From account in this file')).toHaveValue('1500 Due From Lebanon');
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+    expect(saveReviewDecisions).toHaveBeenCalledWith('g1', { runId: 'run-2', action: 'DueToFrom', lineIds: ['l1'], counterpartyEntityId: 'leb' });
+  });
+
+  test('bulk due to/from with a newly chosen account saves the account too', async () => {
+    const user = userEvent.setup();
+    getReviewAccounts.mockResolvedValue({ ...ACCOUNTS, dueToFrom: [] });
+    listReviewLines.mockResolvedValue(accountResponse([accountLine(), accountLine({ lineId: 'l2', memo: 'other' })]));
+    render(<ReviewQueue />);
+    await screen.findByText('other');
+    await user.click(screen.getByRole('checkbox', { name: 'Select page' }));
+    await user.click(screen.getByRole('button', { name: 'Due To/From…' }));
+    await user.click(screen.getByRole('combobox', { name: 'Other entity' }));
+    await user.click(screen.getByRole('option', { name: 'Lebanon' }));
+    await user.click(screen.getByLabelText('Due To/From account in this file'));
+    await user.click(screen.getByRole('option', { name: '1500 Due From Lebanon' }));
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+    expect(saveReviewDecisions).toHaveBeenCalledWith('g1', {
+      runId: 'run-2', action: 'DueToFrom', lineIds: ['l1', 'l2'], counterpartyEntityId: 'leb',
+      account: { code: '1500', name: 'Due From Lebanon' }, rememberAccount: true,
+    });
+    await waitFor(() => expect(getReviewAccounts).toHaveBeenCalledTimes(2));
+  });
+
+  test('the account named for the entity is filled in when none is saved', async () => {
+    const user = userEvent.setup();
+    getReviewAccounts.mockResolvedValue({ ...ACCOUNTS, dueToFrom: [], detectedDueToFrom: [{ entityId: 'leb', account: { code: '1500', name: 'Due From Lebanon' } }] });
+    listReviewLines.mockResolvedValue(accountResponse([accountLine()]));
+    render(<ReviewQueue />);
+    await user.click(await screen.findByRole('button', { name: 'More actions for l1' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Due To/From…' }));
+    await user.click(screen.getByRole('combobox', { name: 'Other entity' }));
+    await user.click(screen.getByRole('option', { name: 'Lebanon' }));
+    expect(screen.getByLabelText('Due To/From account in this file')).toHaveValue('1500 Due From Lebanon');
+    expect(screen.getByRole('checkbox', { name: /Make this the default/ })).toBeChecked();
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+    expect(saveReviewDecisions).toHaveBeenCalledWith('g1', {
+      runId: 'run-2', action: 'DueToFrom', lineIds: ['l1'], counterpartyEntityId: 'leb',
+      account: { code: '1500', name: 'Due From Lebanon' }, rememberAccount: true,
+    });
+  });
+
+  test('a one-off account (e.g. Due To instead of Due From) is not made the default unless ticked', async () => {
+    const user = userEvent.setup();
+    listReviewLines.mockResolvedValue(accountResponse([accountLine()]));
+    render(<ReviewQueue />);
+    await user.click(await screen.findByRole('button', { name: 'More actions for l1' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Due To/From…' }));
+    await user.click(screen.getByRole('combobox', { name: 'Other entity' }));
+    await user.click(screen.getByRole('option', { name: 'Lebanon' }));
+    expect(screen.queryByRole('checkbox', { name: /Make this the default/ })).not.toBeInTheDocument();
+    await user.click(screen.getByLabelText('Due To/From account in this file'));
+    await user.click(screen.getByRole('option', { name: '6150 Breakroom' }));
+    expect(screen.getByRole('checkbox', { name: /Make this the default/ })).not.toBeChecked();
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+    expect(saveReviewDecisions).toHaveBeenCalledWith('g1', {
+      runId: 'run-2', action: 'DueToFrom', lineIds: ['l1'], counterpartyEntityId: 'leb',
+      account: { code: '6150', name: 'Breakroom' }, rememberAccount: false,
+    });
+    expect(getReviewAccounts).toHaveBeenCalledTimes(1);
+  });
+
+  test('set up the Due To/From accounts for the file', async () => {
+    const user = userEvent.setup();
+    getReviewAccounts.mockResolvedValue({ ...ACCOUNTS, dueToFrom: [] });
+    saveDueToFromAccount.mockResolvedValue({});
+    listReviewLines.mockResolvedValue(accountResponse([accountLine()]));
+    render(<ReviewQueue />);
+    await screen.findByText('Reclassify to 6150 Breakroom');
+    await user.click(screen.getByRole('button', { name: 'Due To/From accounts' }));
+    // One picker per other entity (not Milford, whose file this is).
+    expect(screen.queryByLabelText('Milford')).not.toBeInTheDocument();
+    await user.click(screen.getByLabelText('Lebanon'));
+    await user.click(screen.getByRole('option', { name: '1500 Due From Lebanon' }));
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+    expect(saveDueToFromAccount).toHaveBeenCalledWith('g1', 'mil-file', 'leb', { code: '1500', name: 'Due From Lebanon' });
+    expect(await screen.findByText(/Due To\/From accounts saved/)).toBeInTheDocument();
   });
 });

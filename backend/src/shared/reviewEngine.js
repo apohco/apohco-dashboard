@@ -310,6 +310,210 @@ function validateAllocations(allocations, lineAmount, validEntityIds) {
   return null;
 }
 
+// ---------------------------------------------------------------------
+// Account review (files without classes: each dental home's own file).
+//
+// The question per line is "where does this belong?", with two kinds of
+// answer ("outcomes"): an account in this file ('acct:<accountKey>') or
+// another entity, through this file's Due To/From account for it
+// ('due:<entityId>'). Signals:
+//   - History: where this vendor's lines of the same account type went in
+//     earlier months (Paul's Keep/Reclassify/DueToFrom decisions count
+//     DECISION_WEIGHT times). Keyed by account type so the bank side of a
+//     purchase never dilutes the expense side.
+//   - Keywords: another entity's keywords/aliases/name in the memo point
+//     to Due To/From that entity.
+// The stronger signal wins; both strong and different is a Conflict.
+// ---------------------------------------------------------------------
+
+const acctOutcome = (key) => `acct:${key}`;
+const dueOutcome = (entityId) => `due:${entityId}`;
+const DUE_ACCOUNT_RE = /\bdue\s+(to|from)\b/i;
+
+// The entity an intercompany account is for, read from its name ("114003
+// Due from Montgomery Pediatric Dentistry" -> Montgomery), or null. Uses
+// the same entity terms as memo matching (keywords, aliases, name).
+function dueAccountEntity(entityTerms, accountName) {
+  if (!accountName || !DUE_ACCOUNT_RE.test(accountName)) return null;
+  const hit = entityKeywordSuggestion(entityTerms, { memo: accountName });
+  return hit ? hit.entityId : null;
+}
+
+// Each other entity's Due To/From account in a file, found by name:
+// Map entityId -> { accountKey, code, name }, preferring "Due from"
+// (what a practice is owed when it paid for another entity) over "Due to".
+// accounts: [{ key, code, name }].
+function detectDueToFromAccounts(entities, ownerEntityId, accounts) {
+  const terms = buildEntityTerms(entities).filter((t) => t.entityId !== ownerEntityId);
+  const found = new Map();
+  for (const a of accounts) {
+    const entityId = dueAccountEntity(terms, a.name);
+    if (!entityId) continue;
+    const isFrom = /\bdue\s+from\b/i.test(a.name);
+    const prev = found.get(entityId);
+    if (!prev || (isFrom && !prev.isFrom)) found.set(entityId, { accountKey: a.key, code: a.code || null, name: a.name, isFrom });
+  }
+  return new Map([...found].map(([id, { isFrom, ...a }]) => [id, a]));
+}
+
+// rows: [{ vendorId, accountType, accountKey, accountCode, accountName,
+//          decisionAction, targetAccountKey, targetAccountCode,
+//          targetAccountName, counterpartyEntityId, count }]
+// Returns { tallies: Map "vendorId|accountType" -> { outcome: weight },
+//           labels: Map accountKey -> { code, name } }.
+function buildAccountHistory(rows) {
+  const tallies = new Map();
+  const labels = new Map();
+  const label = (key, code, name) => {
+    if (key && !labels.has(key)) labels.set(key, { code: code || null, name: name || null });
+  };
+  for (const r of rows) {
+    if (!r.vendorId) continue;
+    const tKey = `${r.vendorId}|${r.accountType || 'Unknown'}`;
+    if (!tallies.has(tKey)) tallies.set(tKey, {});
+    const tally = tallies.get(tKey);
+    const n = Number(r.count) || 0;
+    label(r.accountKey, r.accountCode, r.accountName);
+    if (r.decisionAction === 'Reclassify' && r.targetAccountKey) {
+      label(r.targetAccountKey, r.targetAccountCode, r.targetAccountName);
+      addWeight(tally, acctOutcome(r.targetAccountKey), n * DECISION_WEIGHT);
+    } else if (r.decisionAction === 'DueToFrom' && r.counterpartyEntityId) {
+      addWeight(tally, dueOutcome(r.counterpartyEntityId), n * DECISION_WEIGHT);
+    } else if (r.decisionAction === 'Keep' && r.accountKey) {
+      addWeight(tally, acctOutcome(r.accountKey), n * DECISION_WEIGHT);
+    } else if (r.accountKey) {
+      addWeight(tally, acctOutcome(r.accountKey), n);
+    }
+  }
+  return { tallies, labels };
+}
+
+// Classifies every line of an account review.
+//
+// input: {
+//   lines: [{ lineId, fingerprint, vendorId, payeeName, memo, accountType,
+//             accountKey, accountCode, accountName }],
+//   entities, ownerEntityId (the entity this file belongs to, or null),
+//   dueToFrom: Map counterpartyEntityId -> { accountKey, code, name },
+//   history: result of buildAccountHistory, threshold, mediumThreshold,
+// }
+function classifyAccountLines({
+  lines,
+  entities,
+  ownerEntityId = null,
+  dueToFrom = new Map(),
+  history = { tallies: new Map(), labels: new Map() },
+  threshold = 0.9,
+  mediumThreshold = 0.7,
+}) {
+  const names = new Map(entities.map((e) => [e.entityId, e.entityName]));
+  const nameOf = (id) => names.get(id) || 'an unknown entity';
+  // The file's own entity is never "another entity".
+  const entityTerms = buildEntityTerms(entities).filter((t) => t.entityId !== ownerEntityId);
+  const dueByAccount = new Map([...dueToFrom].map(([entityId, a]) => [a.accountKey, entityId]));
+  const level = (c) => (c >= threshold ? 'High' : c >= mediumThreshold ? 'Medium' : 'Low');
+  const pct = (c) => `${Math.round(c * 100)}%`;
+  const accountLabel = (key) => {
+    const l = history.labels.get(key);
+    return l ? [l.code, l.name].filter(Boolean).join(' ') : key.replace(/^(code|name):/, '');
+  };
+  const describe = (outcome) =>
+    outcome.startsWith('due:') ? `Due To/From ${nameOf(outcome.slice(4))}` : accountLabel(outcome.slice(5));
+  // An account that is a Due To/From account (the saved one, or one named
+  // "Due to/from <entity>") stands for that entity: being in it, or moving
+  // to it, is the same outcome as Due To/From.
+  const outcomeOfAccount = (key, name) => {
+    if (dueByAccount.has(key)) return dueOutcome(dueByAccount.get(key));
+    const entityId = dueAccountEntity(entityTerms, name);
+    return entityId ? dueOutcome(entityId) : acctOutcome(key);
+  };
+  const canonical = new Map();
+  const canonicalTally = (tKey) => {
+    if (!canonical.has(tKey)) {
+      const merged = {};
+      for (const [outcome, w] of Object.entries(history.tallies.get(tKey) || {})) {
+        const key = outcome.slice(5);
+        addWeight(merged, outcome.startsWith('acct:') ? outcomeOfAccount(key, history.labels.get(key)?.name) : outcome, w);
+      }
+      canonical.set(tKey, merged);
+    }
+    return canonical.get(tKey);
+  };
+
+  return lines.map((line) => {
+    const currentOutcome = outcomeOfAccount(line.accountKey, line.accountName);
+    const hist = line.vendorId ? scoreTally(canonicalTally(`${line.vendorId}|${line.accountType || 'Unknown'}`)) : null;
+    const keywordHit = entityKeywordSuggestion(entityTerms, line);
+    const reasons = [];
+
+    const candidates = [];
+    if (keywordHit) {
+      candidates.push({ outcome: dueOutcome(keywordHit.entityId), confidence: keywordHit.confidence, source: 'Keyword' });
+      reasons.push(`Memo mentions "${keywordHit.term}" (${nameOf(keywordHit.entityId)})`);
+    }
+    if (hist) {
+      candidates.push({ outcome: hist.entityId, confidence: hist.confidence, source: 'History' });
+      reasons.push(
+        `History: ${pct(hist.share)} of ${Math.round(hist.total * 10) / 10} weighted past ` +
+          `${line.accountType ? `${line.accountType} ` : ''}lines for this vendor went to ${describe(hist.entityId)}`
+      );
+    }
+    if (!line.vendorId) reasons.push('No payee on this line');
+    // Highest confidence wins; a tie goes to the memo keyword.
+    const best = candidates.reduce((a, c) => (!a || c.confidence > a.confidence ? c : a), null);
+
+    let status;
+    const strong = best && best.confidence >= threshold;
+    const strongOthers = candidates.filter((c) => c.confidence >= threshold);
+    if (strongOthers.length === 2 && strongOthers[0].outcome !== strongOthers[1].outcome) {
+      status = 'Conflict';
+      reasons.push(`Conflict: the memo says ${describe(strongOthers[0].outcome)}, history says ${describe(strongOthers[1].outcome)}`);
+    } else if (strong && best.outcome === currentOutcome) {
+      status = 'Confirmed';
+    } else if (strong) {
+      status = 'LikelyMisclassified';
+    } else {
+      status = 'NeedsEvidence';
+    }
+
+    let suggestedAction = null;
+    let suggestedEntityId = null;
+    let suggestedAccount = null;
+    if (best) {
+      if (best.outcome === currentOutcome) {
+        suggestedAction = 'Keep';
+      } else if (best.outcome.startsWith('due:')) {
+        suggestedAction = 'DueToFrom';
+        suggestedEntityId = best.outcome.slice(4);
+        const mapped = dueToFrom.get(suggestedEntityId);
+        if (mapped) suggestedAccount = { code: mapped.code || null, name: mapped.name };
+        else reasons.push(`Set the Due To/From account for ${nameOf(suggestedEntityId)} to approve this`);
+      } else {
+        suggestedAction = 'Reclassify';
+        const l = history.labels.get(best.outcome.slice(5));
+        suggestedAccount = { code: l?.code || null, name: l?.name || best.outcome.slice(5).replace(/^(code|name):/, '') };
+      }
+    }
+
+    return {
+      lineId: line.lineId,
+      fingerprint: line.fingerprint,
+      vendorId: line.vendorId || null,
+      currentEntityId: ownerEntityId,
+      suggestedEntityId,
+      suggestedAction,
+      suggestedAccountCode: suggestedAccount?.code || null,
+      suggestedAccountName: suggestedAccount?.name || null,
+      confidence: best ? Math.round(best.confidence * 10000) / 10000 : 0,
+      confidenceLevel: best ? level(best.confidence) : null,
+      status,
+      source: best ? best.source : 'None',
+      reasons,
+      ruleId: null,
+    };
+  });
+}
+
 function countStatuses(results) {
   const counts = Object.fromEntries(STATUSES.map((s) => [s, 0]));
   for (const r of results) counts[r.status] += 1;
@@ -330,4 +534,8 @@ module.exports = {
   decisionEntity,
   validateAllocations,
   countStatuses,
+  buildAccountHistory,
+  classifyAccountLines,
+  dueAccountEntity,
+  detectDueToFromAccounts,
 };

@@ -14,14 +14,20 @@ const {
   decisionEntity,
   validateAllocations,
   countStatuses,
+  buildAccountHistory,
+  classifyAccountLines,
+  detectDueToFromAccounts,
 } = require('../../../shared/reviewEngine');
+const { accountKey } = require('../../../shared/accountKey');
 
 const DEFAULT_SETTINGS = { threshold: 0.9, mediumThreshold: 0.7, historyMonths: 12 };
 const DEFAULT_LIMIT = 100;
 const MAX_LIMIT = 500;
 const MAX_DECISIONS_PER_REQUEST = 10000;
 const ACCOUNT_TYPES = ['Asset', 'Liability', 'Equity', 'Revenue', 'Expense', 'Unknown'];
-const BULK_ACTIONS = ['Approve', 'Keep', 'Reassign'];
+const BULK_ACTIONS = ['Approve', 'Keep', 'Reassign', 'Reclassify', 'DueToFrom'];
+// Entity assignment only makes sense where lines carry classes.
+const CLASS_ONLY_ACTIONS = ['Reassign', 'Split'];
 const LINE_ACTIONS = [...BULK_ACTIONS, 'Split', 'Undo'];
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 // Review order: what most needs attention first.
@@ -93,7 +99,7 @@ async function loadEntities(groupId) {
 async function loadRun(groupId, runId) {
   if (!isUuid(runId)) throw badRequest('Review run not found', 404);
   const { rows } = await query(
-    `SELECT RunId, QBOId, TO_CHAR(Period, 'YYYY-MM') AS month, SnapshotId, Threshold, MediumThreshold
+    `SELECT RunId, QBOId, TO_CHAR(Period, 'YYYY-MM') AS month, SnapshotId, Threshold, MediumThreshold, ReviewKind
      FROM CtrlReviewRuns WHERE RunId = $1 AND GroupId = $2`,
     [runId, groupId]
   );
@@ -172,7 +178,204 @@ async function loadHistoryRows(client, groupId, qboId, month, historyMonths) {
   return rows;
 }
 
+// ---- Accounts of one QBO file (account review, Reclassify, Due To/From)
+
+// accountKey -> account type: the dashboard's Chart of Accounts, else the
+// type confirmed when a GL was uploaded for the file (latest upload wins).
+async function loadAccountTypes(groupId, qboId, db = { query }) {
+  const types = new Map();
+  const { rows: uploads } = await db.query(
+    `SELECT AccountClassifications FROM CtrlUploads
+     WHERE GroupId = $1 AND QBOId = $2 AND Status = 'Imported' AND AccountClassifications IS NOT NULL
+     ORDER BY ImportedDate`,
+    [groupId, qboId]
+  );
+  for (const u of uploads) for (const [key, type] of Object.entries(u.accountclassifications || {})) types.set(key, type);
+  const { rows: coa } = await db.query(
+    `SELECT AccountCode, AccountName, Classification FROM ChartOfAccountsMappings
+     WHERE GroupId = $1 AND QBOId = $2 AND Classification IS NOT NULL`,
+    [groupId, qboId]
+  );
+  for (const m of coa) types.set(accountKey(m.accountcode || null, m.accountname), m.classification);
+  return types;
+}
+
+// Every account seen in the file (Chart of Accounts + stored GL lines):
+// [{ key, code, name, type }], by code then name.
+async function loadFileAccounts(groupId, qboId) {
+  const [{ rows: coa }, { rows: seen }, types] = await Promise.all([
+    query(`SELECT AccountCode, AccountName FROM ChartOfAccountsMappings WHERE GroupId = $1 AND QBOId = $2`, [groupId, qboId]),
+    query(
+      `SELECT DISTINCT AccountCode, AccountName FROM CtrlLedgerLines
+       WHERE GroupId = $1 AND QBOId = $2 AND COALESCE(AccountName, '') <> ''`,
+      [groupId, qboId]
+    ),
+    loadAccountTypes(groupId, qboId),
+  ]);
+  const byKey = new Map();
+  for (const a of [...coa, ...seen]) {
+    if (!a.accountname) continue;
+    const key = accountKey(a.accountcode || null, a.accountname);
+    if (!byKey.has(key)) byKey.set(key, { key, code: a.accountcode || null, name: a.accountname, type: types.get(key) || 'Unknown' });
+  }
+  return [...byKey.values()].sort((a, b) => (a.code || '~').localeCompare(b.code || '~') || a.name.localeCompare(b.name));
+}
+
+// The account a request names ({ code?, name }), as the file knows it.
+async function resolveAccount(groupId, qboId, account) {
+  if (!account || typeof account.name !== 'string' || !account.name.trim()) throw badRequest('account (with a name) is required');
+  const key = accountKey(account.code ? String(account.code).trim() : null, account.name.trim());
+  const found = (await loadFileAccounts(groupId, qboId)).find((a) => a.key === key);
+  if (!found) throw badRequest(`"${account.name}" is not an account in this QBO file`);
+  return found;
+}
+
+// The entity whose own (practice) file this is, when exactly one is.
+async function loadOwnerEntityId(groupId, qboId) {
+  const { rows } = await query(
+    `SELECT EntityId FROM CtrlEntities WHERE GroupId = $1 AND PracticeQBOId = $2 AND IsActive`,
+    [groupId, qboId]
+  );
+  return rows.length === 1 ? rows[0].entityid : null;
+}
+
+// counterpartyEntityId -> { accountKey, code, name } for one file.
+async function loadDueToFrom(groupId, qboId, db = { query }) {
+  const { rows } = await db.query(
+    `SELECT CounterpartyEntityId, AccountCode, AccountName FROM CtrlDueToFromAccounts WHERE GroupId = $1 AND QBOId = $2`,
+    [groupId, qboId]
+  );
+  return new Map(
+    rows.map((r) => [
+      r.counterpartyentityid,
+      { accountKey: accountKey(r.accountcode || null, r.accountname), code: r.accountcode || null, name: r.accountname },
+    ])
+  );
+}
+
+// The Due To/From account per other entity: the saved one, else the one
+// whose name says "Due from/to <entity>". { saved, detected, effective }.
+async function loadEffectiveDueToFrom(groupId, qboId, entities, ownerEntityId, db = { query }) {
+  const [saved, accounts] = await Promise.all([loadDueToFrom(groupId, qboId, db), loadFileAccounts(groupId, qboId)]);
+  const detected = detectDueToFromAccounts(entities, ownerEntityId, accounts);
+  return { saved, detected, effective: new Map([...detected, ...saved]) };
+}
+
+async function saveDueToFrom(db, groupId, qboId, counterpartyEntityId, account, userId) {
+  await db.query(
+    `INSERT INTO CtrlDueToFromAccounts (GroupId, QBOId, CounterpartyEntityId, AccountCode, AccountName, UpdatedBy)
+     VALUES ($1, $2, $3, $4, $5, $6)
+     ON CONFLICT (QBOId, CounterpartyEntityId) DO UPDATE SET AccountCode = EXCLUDED.AccountCode,
+       AccountName = EXCLUDED.AccountName, UpdatedBy = EXCLUDED.UpdatedBy, LastUpdated = now()`,
+    [groupId, qboId, counterpartyEntityId, account.code, account.name, userId]
+  );
+}
+
+// Account history for this file over the months before `month`: each
+// month's latest snapshot, with Paul's latest decision per line.
+async function loadAccountHistoryRows(client, groupId, qboId, month, historyMonths) {
+  const { rows } = await client.query(
+    `WITH snaps AS (
+       SELECT DISTINCT ON (Period) SnapshotId FROM CtrlSnapshots
+       WHERE GroupId = $1 AND QBOId = $2 AND Period >= $3 AND Period < $4
+       ORDER BY Period, PulledAt DESC
+     ),
+     dec AS (
+       SELECT DISTINCT ON (Fingerprint) Fingerprint, Action, TargetAccountCode, TargetAccountName, CounterpartyEntityId
+       FROM CtrlDecisions WHERE GroupId = $1 AND QBOId = $2
+       ORDER BY Fingerprint, DecidedAt DESC
+     )
+     SELECT l.PayeeName, l.AccountCode, l.AccountName,
+            d.Action, d.TargetAccountCode, d.TargetAccountName, d.CounterpartyEntityId, COUNT(*)::int AS n
+     FROM CtrlLedgerLines l
+     JOIN snaps s ON s.SnapshotId = l.SnapshotId
+     LEFT JOIN dec d ON d.Fingerprint = l.Fingerprint
+     GROUP BY l.PayeeName, l.AccountCode, l.AccountName, d.Action, d.TargetAccountCode, d.TargetAccountName, d.CounterpartyEntityId`,
+    [groupId, qboId, `${shiftMonth(month, -historyMonths)}-01`, `${month}-01`]
+  );
+  return rows;
+}
+
+// Class review (the management file): which entity each line belongs to.
+async function classifyClassRun(client, { groupId, qboId, month, settings, entities, lineRows, vendorByKey }) {
+  const rules = await loadRules(client, groupId);
+  const resolve = buildEntityResolver(entities);
+  const historyRows = await loadHistoryRows(client, groupId, qboId, month, settings.historyMonths);
+  const history = buildHistory(
+    historyRows.map((r) => ({
+      vendorId: vendorByKey.get(payeeKey(r.payeename)) || null,
+      accountCode: r.accountcode,
+      entityId: resolve(r.classname, r.qboclassid),
+      decisionAction: r.action,
+      decisionEntityId: r.decisionentityid,
+      allocations: r.allocations,
+      count: r.n,
+    }))
+  );
+  return classifyLines({
+    lines: lineRows.map((l) => ({
+      lineId: l.lineid,
+      fingerprint: l.fingerprint,
+      vendorId: vendorByKey.get(payeeKey(l.payeename)) || null,
+      payeeName: l.payeename,
+      memo: l.memo,
+      accountCode: l.accountcode,
+      className: l.classname,
+      qboClassId: l.qboclassid,
+    })),
+    entities,
+    rules,
+    history,
+    threshold: settings.threshold,
+    mediumThreshold: settings.mediumThreshold,
+  });
+}
+
+// Account review (practice files): right account, or another entity's.
+async function classifyAccountRun(client, { groupId, qboId, month, settings, entities, lineRows, vendorByKey }) {
+  const types = await loadAccountTypes(groupId, qboId, client);
+  const typeOf = (code, name) => types.get(accountKey(code || null, name)) || 'Unknown';
+  const ownerEntityId = await loadOwnerEntityId(groupId, qboId);
+  const { effective: dueToFrom } = await loadEffectiveDueToFrom(groupId, qboId, entities, ownerEntityId, client);
+  const historyRows = await loadAccountHistoryRows(client, groupId, qboId, month, settings.historyMonths);
+  const history = buildAccountHistory(
+    historyRows.map((r) => ({
+      vendorId: vendorByKey.get(payeeKey(r.payeename)) || null,
+      accountType: typeOf(r.accountcode, r.accountname),
+      accountKey: accountKey(r.accountcode || null, r.accountname),
+      accountCode: r.accountcode,
+      accountName: r.accountname,
+      decisionAction: r.action,
+      targetAccountKey: r.targetaccountname ? accountKey(r.targetaccountcode || null, r.targetaccountname) : null,
+      targetAccountCode: r.targetaccountcode,
+      targetAccountName: r.targetaccountname,
+      counterpartyEntityId: r.counterpartyentityid,
+      count: r.n,
+    }))
+  );
+  return classifyAccountLines({
+    lines: lineRows.map((l) => ({
+      lineId: l.lineid,
+      fingerprint: l.fingerprint,
+      vendorId: vendorByKey.get(payeeKey(l.payeename)) || null,
+      payeeName: l.payeename,
+      memo: l.memo,
+      accountType: typeOf(l.accountcode, l.accountname),
+      accountKey: accountKey(l.accountcode || null, l.accountname),
+      accountCode: l.accountcode,
+      accountName: l.accountname,
+    })),
+    entities,
+    ownerEntityId,
+    dueToFrom,
+    history,
+    threshold: settings.threshold,
+    mediumThreshold: settings.mediumThreshold,
+  });
+}
+
 // POST /api/controller/review/runs  { groupId, qboId, month }
+// A class-based file gets a class review; any other file an account review.
 async function handleRun(claims, body) {
   const { groupId, qboId, month } = body;
   if (!groupId || !qboId || !month) throw badRequest('groupId, qboId and month are required');
@@ -184,9 +387,7 @@ async function handleRun(claims, body) {
     [qboId, groupId]
   );
   if (!qboRows.length) throw badRequest('QBO not found for this Group', 404);
-  if (!qboRows[0].isclassbased) {
-    throw badRequest(`${qboRows[0].qboname} doesn't use classes, so there are no class assignments to review`);
-  }
+  const reviewKind = qboRows[0].isclassbased ? 'Class' : 'Account';
 
   const { rows: snapRows } = await query(
     `SELECT SnapshotId FROM CtrlSnapshots WHERE GroupId = $1 AND QBOId = $2 AND Period = $3
@@ -200,54 +401,24 @@ async function handleRun(claims, body) {
   const entities = await loadEntities(groupId);
   if (!entities.length) throw badRequest('Add your entities (Controller → Entities) before running a review');
   const { rows: lineRows } = await query(
-    `SELECT LineId, Fingerprint, PayeeName, Memo, AccountCode, ClassName, QBOClassId
+    `SELECT LineId, Fingerprint, PayeeName, Memo, AccountCode, AccountName, ClassName, QBOClassId
      FROM CtrlLedgerLines WHERE SnapshotId = $1 AND GroupId = $2`,
     [snapshotId, groupId]
   );
 
   const result = await withTransaction(async (client) => {
     const vendorByKey = await ensureVendors(client, groupId, lineRows.map((l) => l.payeename).filter(Boolean));
-    const rules = await loadRules(client, groupId);
-    const resolve = buildEntityResolver(entities);
-    const historyRows = await loadHistoryRows(client, groupId, qboId, month, settings.historyMonths);
-    const history = buildHistory(
-      historyRows.map((r) => ({
-        vendorId: vendorByKey.get(payeeKey(r.payeename)) || null,
-        accountCode: r.accountcode,
-        entityId: resolve(r.classname, r.qboclassid),
-        decisionAction: r.action,
-        decisionEntityId: r.decisionentityid,
-        allocations: r.allocations,
-        count: r.n,
-      }))
-    );
-
-    const results = classifyLines({
-      lines: lineRows.map((l) => ({
-        lineId: l.lineid,
-        fingerprint: l.fingerprint,
-        vendorId: vendorByKey.get(payeeKey(l.payeename)) || null,
-        payeeName: l.payeename,
-        memo: l.memo,
-        accountCode: l.accountcode,
-        className: l.classname,
-        qboClassId: l.qboclassid,
-      })),
-      entities,
-      rules,
-      history,
-      threshold: settings.threshold,
-      mediumThreshold: settings.mediumThreshold,
-    });
+    const input = { groupId, qboId, month, settings, entities, lineRows, vendorByKey };
+    const results = reviewKind === 'Class' ? await classifyClassRun(client, input) : await classifyAccountRun(client, input);
     const statusCounts = countStatuses(results);
 
     const { rows: runRows } = await client.query(
-      `INSERT INTO CtrlReviewRuns (GroupId, QBOId, Period, SnapshotId, Threshold, MediumThreshold, HistoryMonths, LineCount, StatusCounts, RunBy)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+      `INSERT INTO CtrlReviewRuns (GroupId, QBOId, Period, SnapshotId, Threshold, MediumThreshold, HistoryMonths, LineCount, StatusCounts, RunBy, ReviewKind)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
        RETURNING RunId, RunDate`,
       [
         groupId, qboId, `${month}-01`, snapshotId, settings.threshold, settings.mediumThreshold,
-        settings.historyMonths, results.length, JSON.stringify(statusCounts), claims.userId,
+        settings.historyMonths, results.length, JSON.stringify(statusCounts), claims.userId, reviewKind,
       ]
     );
     const run = runRows[0];
@@ -255,21 +426,23 @@ async function handleRun(claims, body) {
       await insertRows(
         client,
         'CtrlSuggestions',
-        ['RunId', 'GroupId', 'LineId', 'Fingerprint', 'VendorId', 'CurrentEntityId', 'SuggestedEntityId', 'Confidence', 'Status', 'Source', 'Reasons', 'RuleId'],
+        ['RunId', 'GroupId', 'LineId', 'Fingerprint', 'VendorId', 'CurrentEntityId', 'SuggestedEntityId', 'Confidence', 'Status', 'Source', 'Reasons', 'RuleId',
+          'SuggestedAction', 'SuggestedAccountCode', 'SuggestedAccountName'],
         results.map((r) => [
           run.runid, groupId, r.lineId, r.fingerprint, r.vendorId, r.currentEntityId, r.suggestedEntityId,
           r.confidence, r.status, r.source, JSON.stringify(r.reasons), r.ruleId,
+          r.suggestedAction || null, r.suggestedAccountCode || null, r.suggestedAccountName || null,
         ])
       );
     }
     await recordAudit(
       {
         groupId, userId: claims.userId, action: 'ctrl.review.run', targetType: 'CtrlReviewRun', targetId: run.runid,
-        details: { qboId, month, snapshotId, lineCount: results.length, statusCounts, ...settings },
+        details: { qboId, month, snapshotId, reviewKind, lineCount: results.length, statusCounts, ...settings },
       },
       client
     );
-    return { runId: run.runid, runDate: run.rundate, statusCounts, lineCount: results.length };
+    return { runId: run.runid, runDate: run.rundate, reviewKind, statusCounts, lineCount: results.length };
   });
 
   return json(201, { ...result, qboId, month, snapshotId });
@@ -279,7 +452,7 @@ async function handleRun(claims, body) {
 async function handleListRuns(groupId, qs) {
   if (!qs.qboId || !parseMonth(qs.month)) throw badRequest('qboId and month (YYYY-MM) are required');
   const { rows: runs } = await query(
-    `SELECT r.RunId, r.RunDate, r.LineCount, r.StatusCounts, r.SnapshotId, r.Threshold
+    `SELECT r.RunId, r.RunDate, r.LineCount, r.StatusCounts, r.SnapshotId, r.Threshold, r.ReviewKind
      FROM CtrlReviewRuns r WHERE r.GroupId = $1 AND r.QBOId = $2 AND r.Period = $3
      ORDER BY r.RunDate DESC LIMIT 20`,
     [groupId, qs.qboId, `${qs.month}-01`]
@@ -300,6 +473,7 @@ async function handleListRuns(groupId, qs) {
       lineCount: r.linecount,
       statusCounts: r.statuscounts,
       threshold: Number(r.threshold),
+      reviewKind: r.reviewkind,
       // A newer pull/upload of the month exists: run the review again.
       isStale: Boolean(latestSnapshot && latestSnapshot.snapshotid !== r.snapshotid),
     })),
@@ -347,7 +521,7 @@ function buildFilterSql(f, start) {
   }
   if (f.entityId) {
     const x = p(f.entityId);
-    clauses.push(`(s.SuggestedEntityId = ${x} OR s.CurrentEntityId = ${x} OR d.EntityId = ${x})`);
+    clauses.push(`(s.SuggestedEntityId = ${x} OR s.CurrentEntityId = ${x} OR d.EntityId = ${x} OR d.CounterpartyEntityId = ${x})`);
   }
   if (f.search) clauses.push(`l.Memo ILIKE ${p(likePattern(f.search))}`);
   return { sql: clauses.map((c) => ` AND ${c}`).join(''), params };
@@ -372,7 +546,8 @@ const QUEUE_FROM = `
     ORDER BY u.ImportedDate DESC LIMIT 1
   ) ua ON m.Classification IS NULL
   LEFT JOIN (
-    SELECT DISTINCT ON (Fingerprint) Fingerprint, Action, EntityId, Allocations, DecidedAt
+    SELECT DISTINCT ON (Fingerprint) Fingerprint, Action, EntityId, Allocations, DecidedAt,
+           TargetAccountCode, TargetAccountName, CounterpartyEntityId
     FROM CtrlDecisions WHERE GroupId = $1 AND QBOId = $3
     ORDER BY Fingerprint, DecidedAt DESC
   ) d ON d.Fingerprint = s.Fingerprint AND d.Action <> 'Undo'
@@ -403,10 +578,12 @@ async function handleLines(groupId, qs) {
   );
   const { rows } = await query(
     `SELECT s.LineId, s.Fingerprint, s.VendorId, s.CurrentEntityId, s.SuggestedEntityId, s.Confidence, s.Status, s.Source, s.Reasons,
+            s.SuggestedAction, s.SuggestedAccountCode, s.SuggestedAccountName,
             TO_CHAR(l.TxnDate, 'YYYY-MM-DD') AS TxnDate, l.TxnType, l.DocNum, l.PayeeName, l.Memo, l.AccountCode, l.AccountName,
             l.ClassName, l.SplitAccount, l.Debit, l.Credit, l.Amount,
             v.DisplayName AS VendorName, v.WatchMode, v.SplitTemplate, ${ACCOUNT_TYPE_SQL} AS AccountType,
-            d.Action AS DecisionAction, d.EntityId AS DecisionEntityId, d.Allocations, d.DecidedAt
+            d.Action AS DecisionAction, d.EntityId AS DecisionEntityId, d.Allocations, d.DecidedAt,
+            d.TargetAccountCode, d.TargetAccountName, d.CounterpartyEntityId
      ${QUEUE_FROM}${where.sql}
      ORDER BY ${STATUS_ORDER}, ABS(l.Amount) DESC, l.TxnDate, s.LineId
      LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
@@ -422,7 +599,14 @@ async function handleLines(groupId, qs) {
   }
 
   return json(200, {
-    run: { runId: run.runid, qboId: run.qboid, month: run.month, threshold: Number(run.threshold), mediumThreshold: Number(run.mediumthreshold) },
+    run: {
+      runId: run.runid,
+      qboId: run.qboid,
+      month: run.month,
+      reviewKind: run.reviewkind || 'Class',
+      threshold: Number(run.threshold),
+      mediumThreshold: Number(run.mediumthreshold),
+    },
     entities: (await loadEntities(groupId)).map((e) => ({ entityId: e.entityId, entityName: e.entityName })),
     summary,
     total: filtered[0].n,
@@ -449,27 +633,55 @@ async function handleLines(groupId, qs) {
       amount: Number(r.amount),
       currentEntityId: r.currententityid,
       suggestedEntityId: r.suggestedentityid,
+      suggestedAction: r.suggestedaction || null,
+      suggestedAccount: r.suggestedaccountname ? { code: r.suggestedaccountcode || null, name: r.suggestedaccountname } : null,
       confidence: Number(r.confidence),
       status: r.status,
       source: r.source,
       reasons: r.reasons,
       decision: r.decisionaction
-        ? { action: r.decisionaction, entityId: r.decisionentityid, allocations: r.allocations, decidedAt: r.decidedat }
+        ? {
+            action: r.decisionaction,
+            entityId: r.decisionentityid,
+            allocations: r.allocations,
+            targetAccount: r.targetaccountname ? { code: r.targetaccountcode || null, name: r.targetaccountname } : null,
+            counterpartyEntityId: r.counterpartyentityid || null,
+            decidedAt: r.decidedat,
+          }
         : null,
     })),
   });
 }
 
 // POST /api/controller/review/decisions
-//   One or more lines: { groupId, runId, action, lineIds, entityId?, allocations?, note? }
-//   Everything matching a filter: { groupId, runId, action, filter, expectedCount, entityId? }
+//   One or more lines: { groupId, runId, action, lineIds, entityId?, allocations?,
+//                        account?, counterpartyEntityId?, note? }
+//   Everything matching a filter: { groupId, runId, action, filter, expectedCount, ... }
 //     (skips lines already decided and lines from watch-mode vendors).
+//
+// Actions:
+//   Approve     apply the suggestion (on an account review it is recorded
+//               as the Keep / Reclassify / DueToFrom it stands for)
+//   Keep        the line is right as it is
+//   Reassign    (class review) the line belongs to entityId
+//   Split       (class review, one line) allocations across entities
+//   Reclassify  move the line to `account` ({ code?, name }) in this file
+//   DueToFrom   the line belongs to counterpartyEntityId: move it to this
+//               file's Due To/From account for that entity -- `account` if
+//               given (saved as the default unless rememberAccount is
+//               false), else the saved default, else the account named
+//               "Due from/to <entity>"
+//   Undo        clear the line's decision
 async function handleDecisions(claims, body) {
   const run = await loadRun(body.groupId, body.runId);
+  const kind = run.reviewkind || 'Class';
   const { action } = body;
   const byFilter = Boolean(body.filter);
   if (!LINE_ACTIONS.includes(action)) throw badRequest(`action must be one of ${LINE_ACTIONS.join(', ')}`);
   if (byFilter && !BULK_ACTIONS.includes(action)) throw badRequest(`Only ${BULK_ACTIONS.join(', ')} can be applied to a whole filter`);
+  if (kind === 'Account' && CLASS_ONLY_ACTIONS.includes(action)) {
+    throw badRequest('This file has no classes; use Reclassify or Due To/From instead');
+  }
   if (!byFilter && (!Array.isArray(body.lineIds) || !body.lineIds.length || !body.lineIds.every(isUuid))) {
     throw badRequest('lineIds (or filter) is required');
   }
@@ -477,36 +689,55 @@ async function handleDecisions(claims, body) {
 
   const entities = await loadEntities(body.groupId);
   const entityIds = new Set(entities.map((e) => e.entityId));
+  const entityName = (id) => entities.find((e) => e.entityId === id)?.entityName || 'that entity';
   if (action === 'Reassign' && !entityIds.has(body.entityId)) throw badRequest('entityId must be an active entity in this Group');
   const note = typeof body.note === 'string' ? body.note.trim().slice(0, 2000) || null : null;
 
+  // The account the line moves to (Reclassify / DueToFrom).
+  let target = null;
+  let saveMapping = false;
+  const needsDueToFrom = action === 'DueToFrom' || (kind === 'Account' && action === 'Approve');
+  const ownerEntityId = needsDueToFrom ? await loadOwnerEntityId(body.groupId, run.qboid) : null;
+  // Each other entity's Due To/From account (saved, else found by name).
+  const dueToFrom = needsDueToFrom
+    ? (await loadEffectiveDueToFrom(body.groupId, run.qboid, entities, ownerEntityId)).effective
+    : new Map();
+  if (action === 'Reclassify') target = await resolveAccount(body.groupId, run.qboid, body.account);
+  if (action === 'DueToFrom') {
+    if (!entityIds.has(body.counterpartyEntityId)) throw badRequest('counterpartyEntityId must be an active entity in this Group');
+    if (body.counterpartyEntityId === ownerEntityId) {
+      throw badRequest('This QBO file already belongs to that entity; choose another entity');
+    }
+    if (body.account) {
+      // Used for these lines; saved as the default unless rememberAccount is false.
+      target = await resolveAccount(body.groupId, run.qboid, body.account);
+      saveMapping = body.rememberAccount !== false;
+    } else {
+      const mapped = dueToFrom.get(body.counterpartyEntityId);
+      if (!mapped) throw badRequest(`Choose the Due To/From account for ${entityName(body.counterpartyEntityId)} in this file first`);
+      target = { key: mapped.accountKey, code: mapped.code, name: mapped.name };
+    }
+  }
+
   const base = [body.groupId, run.runid, run.qboid];
+  const columns = `s.LineId, s.Fingerprint, s.CurrentEntityId, s.SuggestedEntityId, s.SuggestedAction, s.SuggestedAccountCode,
+              s.SuggestedAccountName, l.AccountCode, l.AccountName, l.Amount, v.WatchMode, (d.Fingerprint IS NOT NULL) AS decided`;
   let rows;
   if (byFilter) {
     const filters = parseFilters(body.filter);
     const where = buildFilterSql(filters, base.length + 1);
-    ({ rows } = await query(
-      `SELECT s.LineId, s.Fingerprint, s.CurrentEntityId, s.SuggestedEntityId, l.Amount, v.WatchMode,
-              (d.Fingerprint IS NOT NULL) AS decided
-       ${QUEUE_FROM}${where.sql}`,
-      [...base, ...where.params]
-    ));
+    ({ rows } = await query(`SELECT ${columns} ${QUEUE_FROM}${where.sql}`, [...base, ...where.params]));
     // The user confirmed a count; if the set changed since, stop.
     if (rows.length !== Number(body.expectedCount)) {
       throw badRequest(`The filtered lines changed (now ${rows.length}); refresh and try again`, 409);
     }
   } else {
-    ({ rows } = await query(
-      `SELECT s.LineId, s.Fingerprint, s.CurrentEntityId, s.SuggestedEntityId, l.Amount, v.WatchMode,
-              (d.Fingerprint IS NOT NULL) AS decided
-       ${QUEUE_FROM} AND s.LineId = ANY($4::uuid[])`,
-      [...base, body.lineIds]
-    ));
+    ({ rows } = await query(`SELECT ${columns} ${QUEUE_FROM} AND s.LineId = ANY($4::uuid[])`, [...base, body.lineIds]));
     if (rows.length !== new Set(body.lineIds).size) throw badRequest('Some lines are not in this review run', 404);
   }
   if (rows.length > MAX_DECISIONS_PER_REQUEST) throw badRequest(`At most ${MAX_DECISIONS_PER_REQUEST} lines per request`);
 
-  const skipped = { alreadyDecided: 0, watchMode: 0, nothingToApply: 0 };
+  const skipped = { alreadyDecided: 0, watchMode: 0, nothingToApply: 0, noDueToFromAccount: 0 };
   const decisions = [];
   for (const r of rows) {
     if (byFilter && r.decided) {
@@ -517,34 +748,65 @@ async function handleDecisions(claims, body) {
       skipped.watchMode += 1;
       continue;
     }
-    let entityId = null;
-    let allocations = null;
-    if (action === 'Split') {
+    const lineKey = accountKey(r.accountcode || null, r.accountname);
+    // What gets recorded for this line (null: nothing to apply).
+    let d = null;
+    if (action === 'Undo') {
+      if (r.decided) d = { action };
+    } else if (action === 'Split') {
       const problem = validateAllocations(body.allocations, r.amount, entityIds);
       if (problem) throw badRequest(problem);
-      allocations = body.allocations.map((a) => ({ entityId: a.entityId, amount: Math.round(Number(a.amount) * 100) / 100 }));
-    } else if (action !== 'Undo') {
-      entityId = decisionEntity(action, { currentEntityId: r.currententityid, suggestedEntityId: r.suggestedentityid }, body.entityId);
-      if (!entityId) {
-        skipped.nothingToApply += 1;
-        continue;
+      d = { action, allocations: body.allocations.map((a) => ({ entityId: a.entityId, amount: Math.round(Number(a.amount) * 100) / 100 })) };
+    } else if (action === 'Reclassify' || action === 'DueToFrom') {
+      if (lineKey !== target.key) d = { action, target, counterpartyEntityId: action === 'DueToFrom' ? body.counterpartyEntityId : null };
+    } else if (kind === 'Account') {
+      const suggested = action === 'Keep' ? 'Keep' : r.suggestedaction;
+      if (suggested === 'Keep') {
+        d = { action: 'Keep' };
+      } else if (suggested === 'Reclassify' && r.suggestedaccountname) {
+        const key = accountKey(r.suggestedaccountcode || null, r.suggestedaccountname);
+        d = key === lineKey
+          ? { action: 'Keep' }
+          : { action: 'Reclassify', target: { key, code: r.suggestedaccountcode || null, name: r.suggestedaccountname } };
+      } else if (suggested === 'DueToFrom' && r.suggestedentityid) {
+        const mapped = dueToFrom.get(r.suggestedentityid);
+        if (!mapped) {
+          skipped.noDueToFromAccount += 1;
+          continue;
+        }
+        d = mapped.accountKey === lineKey
+          ? { action: 'Keep' }
+          : {
+              action: 'DueToFrom',
+              target: { key: mapped.accountKey, code: mapped.code, name: mapped.name },
+              counterpartyEntityId: r.suggestedentityid,
+            };
       }
-    } else if (!r.decided) {
+    } else {
+      const entityId = decisionEntity(action, { currentEntityId: r.currententityid, suggestedEntityId: r.suggestedentityid }, body.entityId);
+      if (entityId) d = { action, entityId };
+    }
+    if (!d) {
       skipped.nothingToApply += 1;
       continue;
     }
     decisions.push([
-      body.groupId, run.qboid, r.fingerprint, r.lineid, run.runid, action, entityId,
-      allocations ? JSON.stringify(allocations) : null, note, claims.userId,
+      body.groupId, run.qboid, r.fingerprint, r.lineid, run.runid, d.action, d.entityId || null,
+      d.allocations ? JSON.stringify(d.allocations) : null, note, claims.userId,
+      d.target ? d.target.code || null : null, d.target ? d.target.name : null, d.counterpartyEntityId || null,
     ]);
   }
 
   await withTransaction(async (client) => {
+    if (saveMapping) await saveDueToFrom(client, body.groupId, run.qboid, body.counterpartyEntityId, target, claims.userId);
     if (decisions.length) {
       await insertRows(
         client,
         'CtrlDecisions',
-        ['GroupId', 'QBOId', 'Fingerprint', 'LineId', 'RunId', 'Action', 'EntityId', 'Allocations', 'Note', 'DecidedBy'],
+        [
+          'GroupId', 'QBOId', 'Fingerprint', 'LineId', 'RunId', 'Action', 'EntityId', 'Allocations', 'Note', 'DecidedBy',
+          'TargetAccountCode', 'TargetAccountName', 'CounterpartyEntityId',
+        ],
         decisions
       );
     }
@@ -552,13 +814,81 @@ async function handleDecisions(claims, body) {
       {
         groupId: body.groupId, userId: claims.userId, action: `ctrl.review.decision.${action.toLowerCase()}`,
         targetType: 'CtrlReviewRun', targetId: run.runid,
-        details: { decided: decisions.length, skipped, byFilter, entityId: body.entityId || null, lineIds: byFilter ? undefined : body.lineIds },
+        details: {
+          decided: decisions.length, skipped, byFilter, entityId: body.entityId || null,
+          targetAccount: target ? { code: target.code, name: target.name } : undefined,
+          counterpartyEntityId: body.counterpartyEntityId || undefined,
+          dueToFromAccountSaved: saveMapping || undefined,
+          lineIds: byFilter ? undefined : body.lineIds,
+        },
       },
       client
     );
   });
 
   return json(200, { decided: decisions.length, skipped });
+}
+
+// GET /api/controller/review/accounts?groupId=&qboId=
+// The file's accounts (for Reclassify) and its Due To/From accounts.
+async function handleAccounts(groupId, qs) {
+  if (!isUuid(qs.qboId)) throw badRequest('qboId is required');
+  const { rows } = await query(`SELECT QBOId FROM QBOs WHERE QBOId = $1 AND GroupId = $2`, [qs.qboId, groupId]);
+  if (!rows.length) throw badRequest('QBO not found for this Group', 404);
+  const [accounts, ownerEntityId, entities] = await Promise.all([
+    loadFileAccounts(groupId, qs.qboId),
+    loadOwnerEntityId(groupId, qs.qboId),
+    loadEntities(groupId),
+  ]);
+  const { saved, detected } = await loadEffectiveDueToFrom(groupId, qs.qboId, entities, ownerEntityId);
+  const list = (map) => [...map].map(([entityId, a]) => ({ entityId, account: { code: a.code, name: a.name } }));
+  return json(200, {
+    ownerEntityId,
+    accounts: accounts.map((a) => ({ code: a.code, name: a.name, type: a.type })),
+    // Saved defaults, and accounts named "Due from/to <entity>" (used when
+    // nothing is saved).
+    dueToFrom: list(saved),
+    detectedDueToFrom: list(detected),
+  });
+}
+
+// PUT /api/controller/review/due-to-from
+//   { groupId, qboId, counterpartyEntityId, account: { code?, name } | null }
+// Sets (or, with account null, clears) which account in this file holds
+// Due To/From counterpartyEntityId. Past decisions keep the account they used.
+async function handleSaveDueToFrom(claims, body) {
+  if (!isUuid(body.qboId)) throw badRequest('qboId is required');
+  const { rows } = await query(`SELECT QBOId FROM QBOs WHERE QBOId = $1 AND GroupId = $2`, [body.qboId, body.groupId]);
+  if (!rows.length) throw badRequest('QBO not found for this Group', 404);
+  const entities = await loadEntities(body.groupId);
+  if (!entities.some((e) => e.entityId === body.counterpartyEntityId)) {
+    throw badRequest('counterpartyEntityId must be an active entity in this Group');
+  }
+  if (body.counterpartyEntityId === (await loadOwnerEntityId(body.groupId, body.qboId))) {
+    throw badRequest('This QBO file belongs to that entity');
+  }
+  const account = body.account ? await resolveAccount(body.groupId, body.qboId, body.account) : null;
+  await withTransaction(async (client) => {
+    if (account) {
+      await saveDueToFrom(client, body.groupId, body.qboId, body.counterpartyEntityId, account, claims.userId);
+    } else {
+      await client.query(
+        `DELETE FROM CtrlDueToFromAccounts WHERE GroupId = $1 AND QBOId = $2 AND CounterpartyEntityId = $3`,
+        [body.groupId, body.qboId, body.counterpartyEntityId]
+      );
+    }
+    await recordAudit(
+      {
+        groupId: body.groupId, userId: claims.userId, action: 'ctrl.review.duetofrom', targetType: 'QBO', targetId: body.qboId,
+        details: { counterpartyEntityId: body.counterpartyEntityId, account: account ? { code: account.code, name: account.name } : null },
+      },
+      client
+    );
+  });
+  return json(200, {
+    counterpartyEntityId: body.counterpartyEntityId,
+    account: account ? { code: account.code, name: account.name } : null,
+  });
 }
 
 exports.handler = withErrorHandling(async (event) => {
@@ -572,6 +902,7 @@ exports.handler = withErrorHandling(async (event) => {
     if (resource.endsWith('/settings')) return json(200, await loadSettings(qs.groupId));
     if (resource.endsWith('/runs')) return handleListRuns(qs.groupId, qs);
     if (resource.endsWith('/lines')) return handleLines(qs.groupId, qs);
+    if (resource.endsWith('/accounts')) return handleAccounts(qs.groupId, qs);
     throw badRequest('Unknown review route', 404);
   }
 
@@ -599,6 +930,7 @@ exports.handler = withErrorHandling(async (event) => {
     return json(200, settings);
   }
   if (httpMethod === 'POST' && resource.endsWith('/decisions')) return handleDecisions(claims, body);
+  if (httpMethod === 'PUT' && resource.endsWith('/due-to-from')) return handleSaveDueToFrom(claims, body);
   throw badRequest('Unknown review route', 404);
 });
 

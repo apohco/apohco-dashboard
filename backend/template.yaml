@@ -763,6 +763,18 @@ Resources:
             RestApiId: !Ref ApohcoDashboardApi
             Path: /api/controller/review/decisions
             Method: post
+        Accounts:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/controller/review/accounts
+            Method: get
+        DueToFrom:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/controller/review/due-to-from
+            Method: put
 
   ManageCtrlVendorsFunction:
     Type: AWS::Serverless::Function

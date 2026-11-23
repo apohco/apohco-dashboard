@@ -112,11 +112,53 @@ describe('POST /api/controller/review/runs', () => {
     expect(sqlOf(client.query).some((s) => /INSERT INTO CtrlAuditLog/.test(s))).toBe(true);
   });
 
-  test('only class-based files can be reviewed', async () => {
-    setup({ routes: runRoutes({ classBased: false }), clientRoutes });
-    const res = await post('/api/controller/review/runs', { qboId: 'qbo-mgmt', month: '2026-10' });
-    expect(res.statusCode).toBe(400);
-    expect(parseBody(res).message).toMatch(/doesn't use classes/);
+  test('a file without classes gets an account review', async () => {
+    setup({
+      routes: [
+        [/FROM QBOs WHERE QBOId/, { rows: [{ qboid: 'qbo-mil', qboname: 'Milford', isclassbased: false }] }],
+        [/FROM CtrlSnapshots WHERE GroupId/, { rows: [{ snapshotid: 'snap-oct' }] }],
+        // Milford's own file.
+        [/FROM CtrlEntities WHERE GroupId = \$1 AND PracticeQBOId/, { rows: [{ entityid: 'ent-mil' }] }],
+        [
+          /FROM CtrlLedgerLines WHERE SnapshotId/,
+          {
+            rows: [
+              { lineid: L1, fingerprint: 'f1', payeename: 'Kroger', memo: '', accountcode: '6100', accountname: 'Supplies' },
+              { lineid: L2, fingerprint: 'f2', payeename: 'Henry Schein', memo: 'Lebanon order', accountcode: '6200', accountname: 'Dental Supplies' },
+            ],
+          },
+        ],
+      ],
+      clientRoutes: [
+        [/FROM CtrlVendorAliases WHERE GroupId/, { rows: [{ payeekey: 'kroger', vendorid: 'v-kroger' }] }],
+        [/INSERT INTO CtrlVendors/, { rows: [{ vendorid: 'v-schein', displayname: 'Henry Schein' }] }],
+        [/FROM CtrlUploads/, { rows: [{ accountclassifications: { 'code:6100': 'Expense', 'code:6150': 'Expense', 'code:6200': 'Expense', 'code:1500': 'Asset' } }] }],
+        [/FROM CtrlDueToFromAccounts/, { rows: [{ counterpartyentityid: 'ent-leb', accountcode: '1500', accountname: 'Due From Lebanon' }] }],
+        // September: 19 Kroger expense lines in 6150 Breakroom.
+        [/TargetAccountCode/, { rows: [{ payeename: 'Kroger', accountcode: '6150', accountname: 'Breakroom', action: null, n: 19 }] }],
+        [/INSERT INTO CtrlReviewRuns/, { rows: [{ runid: RUN_ID, rundate: 'now' }] }],
+      ],
+    });
+    const res = await post('/api/controller/review/runs', { qboId: 'qbo-mil', month: '2026-10' });
+    const data = parseBody(res);
+    expect(res.statusCode).toBe(201);
+    expect(data).toMatchObject({ reviewKind: 'Account', statusCounts: { LikelyMisclassified: 1, NeedsEvidence: 1 } });
+    // No class history or vendor rules are read for an account review.
+    expect(sqlOf(client.query).some((s) => /FROM CtrlVendorRules/.test(s))).toBe(false);
+
+    const runInsert = client.query.mock.calls.find(([sql]) => /INSERT INTO CtrlReviewRuns/.test(sql))[1];
+    expect(runInsert[10]).toBe('Account');
+    const sugg = client.query.mock.calls.find(([sql]) => /INSERT INTO CtrlSuggestions/.test(sql))[1];
+    // 15 columns per line. Kroger: history says Breakroom.
+    expect(sugg.slice(0, 15)).toEqual([
+      RUN_ID, 'group-1', L1, 'f1', 'v-kroger', 'ent-mil', null, 0.95, 'LikelyMisclassified', 'History', expect.any(String), null,
+      'Reclassify', '6150', 'Breakroom',
+    ]);
+    // Henry Schein: the memo names Lebanon (a bare name: medium confidence).
+    expect(sugg.slice(15)).toEqual([
+      RUN_ID, 'group-1', L2, 'f2', 'v-schein', 'ent-mil', 'ent-leb', 0.85, 'NeedsEvidence', 'Keyword', expect.any(String), null,
+      'DueToFrom', '1500', 'Due From Lebanon',
+    ]);
   });
 
   test('needs a stored month', async () => {
@@ -174,9 +216,9 @@ describe('POST /api/controller/review/decisions', () => {
     const res = await post('/api/controller/review/decisions', {
       runId: RUN_ID, action: 'Approve', filter: { status: 'Confirmed,LikelyMisclassified,Unclassified' }, expectedCount: 4,
     });
-    expect(parseBody(res)).toEqual({ decided: 1, skipped: { alreadyDecided: 1, watchMode: 1, nothingToApply: 1 } });
+    expect(parseBody(res)).toEqual({ decided: 1, skipped: { alreadyDecided: 1, watchMode: 1, nothingToApply: 1, noDueToFromAccount: 0 } });
     const params = decisionsInsert()[1];
-    expect(params).toEqual(['group-1', 'qbo-mgmt', 'f1', L1, RUN_ID, 'Approve', 'ent-leb', null, null, 'user-paul']);
+    expect(params).toEqual(['group-1', 'qbo-mgmt', 'f1', L1, RUN_ID, 'Approve', 'ent-leb', null, null, 'user-paul', null, null, null]);
   });
 
   test('bulk by filter stops if the matching lines changed since the user looked', async () => {
@@ -190,7 +232,7 @@ describe('POST /api/controller/review/decisions', () => {
     setup({ routes: [[/FROM CtrlSuggestions s/, { rows: [{ ...candidates[2], decided: true }] }]] });
     const res = await post('/api/controller/review/decisions', { runId: RUN_ID, action: 'Reassign', entityId: 'ent-mil', lineIds: [L3], note: ' wrong store ' });
     expect(parseBody(res).decided).toBe(1);
-    expect(decisionsInsert()[1]).toEqual(['group-1', 'qbo-mgmt', 'f3', L3, RUN_ID, 'Reassign', 'ent-mil', null, 'wrong store', 'user-paul']);
+    expect(decisionsInsert()[1]).toEqual(['group-1', 'qbo-mgmt', 'f3', L3, RUN_ID, 'Reassign', 'ent-mil', null, 'wrong store', 'user-paul', null, null, null]);
   });
 
   test('split stores allocations that add up to the line amount', async () => {
@@ -227,6 +269,155 @@ describe('POST /api/controller/review/decisions', () => {
     const res = await post('/api/controller/review/decisions', { runId: RUN_ID, action: 'Undo', lineIds: [L1] });
     expect(parseBody(res).decided).toBe(1);
     expect(decisionsInsert()[1].slice(5, 8)).toEqual(['Undo', null, null]);
+  });
+});
+
+describe('account review: Reclassify and Due To/From', () => {
+  const ACCOUNT_RUN = { ...RUN_ROW, qboid: 'qbo-mil', reviewkind: 'Account' };
+  const L4 = '44444444-4444-4444-4444-444444444444';
+  const FILE_ACCOUNTS = [
+    { accountcode: '6100', accountname: 'Supplies' },
+    { accountcode: '6150', accountname: 'Breakroom' },
+    { accountcode: '1500', accountname: 'Due From Lebanon' },
+    { accountcode: '1510', accountname: 'Due From Milford' },
+  ];
+  const row = (over) => ({
+    currententityid: 'ent-mil', suggestedentityid: null, suggestedaction: null, suggestedaccountcode: null, suggestedaccountname: null,
+    accountcode: '6100', accountname: 'Supplies', amount: '10.00', watchmode: false, decided: false, ...over,
+  });
+  const accountRoutes = ({ lines = [], mappings = [], owner = 'ent-mil', accounts = FILE_ACCOUNTS } = {}) => [
+    [/FROM CtrlReviewRuns WHERE RunId/, { rows: [ACCOUNT_RUN] }],
+    [/FROM CtrlSuggestions s/, { rows: lines }],
+    [/FROM CtrlEntities WHERE GroupId = \$1 AND PracticeQBOId/, { rows: owner ? [{ entityid: owner }] : [] }],
+    [/FROM CtrlDueToFromAccounts/, { rows: mappings }],
+    [/SELECT DISTINCT AccountCode, AccountName FROM CtrlLedgerLines/, { rows: accounts }],
+    [/FROM CtrlUploads/, { rows: [{ accountclassifications: { 'code:6100': 'Expense', 'code:1500': 'Asset' } }] }],
+    [/FROM QBOs WHERE QBOId/, { rows: [{ qboid: 'qbo-mil' }] }],
+  ];
+  const decisionRows = () => client.query.mock.calls.find(([sql]) => /INSERT INTO CtrlDecisions/.test(sql))?.[1];
+  const send = (body) => post('/api/controller/review/decisions', { runId: RUN_ID, ...body });
+
+  test('bulk approve records what each suggestion stands for', async () => {
+    setup({
+      routes: accountRoutes({
+        mappings: [{ counterpartyentityid: 'ent-leb', accountcode: '1500', accountname: 'Due From Lebanon' }],
+        lines: [
+          row({ lineid: L1, fingerprint: 'f1', suggestedaction: 'Reclassify', suggestedaccountcode: '6150', suggestedaccountname: 'Breakroom' }),
+          row({ lineid: L2, fingerprint: 'f2', suggestedaction: 'DueToFrom', suggestedentityid: 'ent-leb' }),
+          // No Due To/From account set up for this entity yet.
+          row({ lineid: L3, fingerprint: 'f3', suggestedaction: 'DueToFrom', suggestedentityid: 'ent-other' }),
+          row({ lineid: L4, fingerprint: 'f4', suggestedaction: 'Keep' }),
+          row({ lineid: '55555555-5555-5555-5555-555555555555', fingerprint: 'f5' }),
+        ],
+      }),
+    });
+    const res = await send({ action: 'Approve', filter: {}, expectedCount: 5 });
+    expect(parseBody(res)).toEqual({ decided: 3, skipped: { alreadyDecided: 0, watchMode: 0, nothingToApply: 1, noDueToFromAccount: 1 } });
+    const p = decisionRows();
+    // 13 columns per decision.
+    expect(p.slice(0, 13)).toEqual(['group-1', 'qbo-mil', 'f1', L1, RUN_ID, 'Reclassify', null, null, null, 'user-paul', '6150', 'Breakroom', null]);
+    expect(p.slice(13, 26)).toEqual(['group-1', 'qbo-mil', 'f2', L2, RUN_ID, 'DueToFrom', null, null, null, 'user-paul', '1500', 'Due From Lebanon', 'ent-leb']);
+    expect(p.slice(26, 39)).toEqual(['group-1', 'qbo-mil', 'f4', L4, RUN_ID, 'Keep', null, null, null, 'user-paul', null, null, null]);
+  });
+
+  test('reclassify moves lines to an account in the file and skips lines already there', async () => {
+    setup({ routes: accountRoutes({ lines: [row({ lineid: L1, fingerprint: 'f1' }), row({ lineid: L2, fingerprint: 'f2', accountcode: '6150', accountname: 'Breakroom' })] }) });
+    const res = await send({ action: 'Reclassify', lineIds: [L1, L2], account: { code: '6150', name: 'Breakroom' } });
+    expect(parseBody(res)).toMatchObject({ decided: 1, skipped: { nothingToApply: 1 } });
+    expect(decisionRows().slice(5, 13)).toEqual(['Reclassify', null, null, null, 'user-paul', '6150', 'Breakroom', null]);
+  });
+
+  test('reclassify to an account the file does not have is refused', async () => {
+    setup({ routes: accountRoutes({ lines: [row({ lineid: L1, fingerprint: 'f1' })] }) });
+    const res = await send({ action: 'Reclassify', lineIds: [L1], account: { code: '9999', name: 'Made Up' } });
+    expect(res.statusCode).toBe(400);
+    expect(parseBody(res).message).toMatch(/not an account in this QBO file/);
+  });
+
+  test('due to/from with an account remembers it for that entity', async () => {
+    setup({ routes: accountRoutes({ lines: [row({ lineid: L1, fingerprint: 'f1' })] }) });
+    const res = await send({ action: 'DueToFrom', lineIds: [L1], counterpartyEntityId: 'ent-leb', account: { code: '1500', name: 'Due From Lebanon' } });
+    expect(parseBody(res).decided).toBe(1);
+    const upsert = client.query.mock.calls.find(([sql]) => /INSERT INTO CtrlDueToFromAccounts/.test(sql));
+    expect(upsert[1]).toEqual(['group-1', 'qbo-mil', 'ent-leb', '1500', 'Due From Lebanon', 'user-paul']);
+    expect(decisionRows().slice(5, 13)).toEqual(['DueToFrom', null, null, null, 'user-paul', '1500', 'Due From Lebanon', 'ent-leb']);
+  });
+
+  test('due to/from without an account uses the saved one, else the one named for the entity, else asks', async () => {
+    const lines = [row({ lineid: L1, fingerprint: 'f1' })];
+    // Saved (wins over the name match).
+    setup({ routes: accountRoutes({ lines, mappings: [{ counterpartyentityid: 'ent-leb', accountcode: '1510', accountname: 'Due From Milford' }] }) });
+    expect(parseBody(await send({ action: 'DueToFrom', lineIds: [L1], counterpartyEntityId: 'ent-leb' })).decided).toBe(1);
+    expect(decisionRows().slice(10, 13)).toEqual(['1510', 'Due From Milford', 'ent-leb']);
+    expect(sqlOf(client.query).some((s) => /INSERT INTO CtrlDueToFromAccounts/.test(s))).toBe(false);
+
+    // Nothing saved: "1500 Due From Lebanon" is found by name.
+    setup({ routes: accountRoutes({ lines }) });
+    expect(parseBody(await send({ action: 'DueToFrom', lineIds: [L1], counterpartyEntityId: 'ent-leb' })).decided).toBe(1);
+    expect(decisionRows().slice(10, 13)).toEqual(['1500', 'Due From Lebanon', 'ent-leb']);
+
+    // Neither.
+    setup({ routes: accountRoutes({ lines, accounts: FILE_ACCOUNTS.filter((a) => !/Due/.test(a.accountname)) }) });
+    const res = await send({ action: 'DueToFrom', lineIds: [L1], counterpartyEntityId: 'ent-leb' });
+    expect(res.statusCode).toBe(400);
+    expect(parseBody(res).message).toMatch(/Choose the Due To\/From account for Lebanon/);
+  });
+
+  test('due to/from with rememberAccount false uses the account without saving it', async () => {
+    setup({ routes: accountRoutes({ lines: [row({ lineid: L1, fingerprint: 'f1' })] }) });
+    const res = await send({
+      action: 'DueToFrom', lineIds: [L1], counterpartyEntityId: 'ent-leb', account: { code: '1510', name: 'Due From Milford' }, rememberAccount: false,
+    });
+    expect(parseBody(res).decided).toBe(1);
+    expect(decisionRows().slice(10, 13)).toEqual(['1510', 'Due From Milford', 'ent-leb']);
+    expect(sqlOf(client.query).some((s) => /INSERT INTO CtrlDueToFromAccounts/.test(s))).toBe(false);
+  });
+
+  test('validation: own entity, unknown entity, and class-only actions', async () => {
+    setup({ routes: accountRoutes({ lines: [row({ lineid: L1, fingerprint: 'f1' })] }) });
+    const status = (body) => send(body).then((r) => r.statusCode);
+    expect(await status({ action: 'DueToFrom', lineIds: [L1], counterpartyEntityId: 'ent-mil', account: { code: '1510', name: 'Due From Milford' } })).toBe(400);
+    expect(await status({ action: 'DueToFrom', lineIds: [L1], counterpartyEntityId: 'ent-nope' })).toBe(400);
+    expect(await status({ action: 'Reassign', lineIds: [L1], entityId: 'ent-leb' })).toBe(400);
+    expect(await status({ action: 'Split', lineIds: [L1], allocations: [] })).toBe(400);
+    expect(await status({ action: 'Reclassify', lineIds: [L1] })).toBe(400);
+    expect(withTransaction).not.toHaveBeenCalled();
+  });
+
+  test('reclassify also works on a class review (management file)', async () => {
+    setup({
+      routes: [
+        [/FROM CtrlSuggestions s/, { rows: [row({ lineid: L1, fingerprint: 'f1' })] }],
+        [/SELECT DISTINCT AccountCode, AccountName FROM CtrlLedgerLines/, { rows: FILE_ACCOUNTS }],
+      ],
+    });
+    const res = await send({ action: 'Reclassify', lineIds: [L1], account: { code: '6150', name: 'Breakroom' } });
+    expect(parseBody(res).decided).toBe(1);
+    expect(decisionRows()[1]).toBe('qbo-mgmt');
+  });
+
+  test('GET accounts lists the file accounts with types and its Due To/From accounts', async () => {
+    setup({ routes: accountRoutes({ mappings: [{ counterpartyentityid: 'ent-leb', accountcode: '1500', accountname: 'Due From Lebanon' }] }) });
+    const data = parseBody(await get('/api/controller/review/accounts', { qboId: '99999999-9999-9999-9999-999999999999' }));
+    expect(data.ownerEntityId).toBe('ent-mil');
+    expect(data.accounts.map((a) => `${a.code} ${a.type}`)).toEqual(['1500 Asset', '1510 Unknown', '6100 Expense', '6150 Unknown']);
+    expect(data.dueToFrom).toEqual([{ entityId: 'ent-leb', account: { code: '1500', name: 'Due From Lebanon' } }]);
+    // Found by name; "Due From Milford" is not offered in Milford's own file.
+    expect(data.detectedDueToFrom).toEqual([{ entityId: 'ent-leb', account: { code: '1500', name: 'Due From Lebanon' } }]);
+  });
+
+  test('PUT due-to-from saves or clears the account for an entity', async () => {
+    setup({ routes: accountRoutes() });
+    const put = (body) =>
+      handler(apiEvent({ method: 'PUT', resource: '/api/controller/review/due-to-from', body: { groupId: 'group-1', qboId: '99999999-9999-9999-9999-999999999999', ...body } }));
+    const saved = await put({ counterpartyEntityId: 'ent-leb', account: { code: '1500', name: 'Due From Lebanon' } });
+    expect(parseBody(saved)).toEqual({ counterpartyEntityId: 'ent-leb', account: { code: '1500', name: 'Due From Lebanon' } });
+    expect(sqlOf(client.query).some((s) => /INSERT INTO CtrlDueToFromAccounts/.test(s))).toBe(true);
+
+    await put({ counterpartyEntityId: 'ent-leb', account: null });
+    expect(sqlOf(client.query).some((s) => /DELETE FROM CtrlDueToFromAccounts/.test(s))).toBe(true);
+
+    expect((await put({ counterpartyEntityId: 'ent-mil', account: { code: '1510', name: 'Due From Milford' } })).statusCode).toBe(400);
   });
 });
 

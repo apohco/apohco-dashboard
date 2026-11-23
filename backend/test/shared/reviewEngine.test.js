@@ -11,6 +11,10 @@ const {
   validateAllocations,
   countStatuses,
   DECISION_WEIGHT,
+  buildAccountHistory,
+  classifyAccountLines,
+  dueAccountEntity,
+  detectDueToFromAccounts,
 } = require('../../src/shared/reviewEngine');
 
 const LEB = 'ent-lebanon';
@@ -207,5 +211,113 @@ describe('decisions and splits', () => {
     expect(countStatuses([{ status: 'Confirmed' }, { status: 'Confirmed' }, { status: 'Conflict' }])).toEqual({
       Unclassified: 0, Confirmed: 2, LikelyMisclassified: 0, Conflict: 1, NeedsEvidence: 0,
     });
+  });
+});
+
+describe('account review (files without classes)', () => {
+  // Milford's own file: Lebanon and Lawrenceburg are "other entities".
+  const acctLine = (over = {}) => ({
+    lineId: 'l1', fingerprint: 'f1', vendorId: 'v-kroger', payeeName: 'Kroger', memo: '', accountType: 'Expense',
+    accountKey: 'code:6100', accountCode: '6100', accountName: 'Supplies', ...over,
+  });
+  const hist = (rows) =>
+    buildAccountHistory(
+      rows.map((r) => ({ vendorId: 'v-kroger', accountType: 'Expense', accountKey: 'code:6100', accountCode: '6100', accountName: 'Supplies', ...r }))
+    );
+  const DUE = new Map([[LEB, { accountKey: 'code:1500', code: '1500', name: 'Due From Lebanon' }]]);
+  const classify = (lines, history, extra = {}) =>
+    classifyAccountLines({ lines, entities: ENTITIES, ownerEntityId: MIL, dueToFrom: DUE, history, threshold: 0.9, mediumThreshold: 0.7, ...extra });
+
+  test('history: plain lines count once, decisions three times, by vendor and account type', () => {
+    const { tallies, labels } = hist([
+      { count: 4 },
+      { count: 2, decisionAction: 'Reclassify', targetAccountKey: 'code:6150', targetAccountCode: '6150', targetAccountName: 'Breakroom' },
+      { count: 1, decisionAction: 'DueToFrom', counterpartyEntityId: LEB },
+      { count: 1, decisionAction: 'Keep' },
+      { count: 5, accountType: 'Asset', accountKey: 'code:1000', accountCode: '1000', accountName: 'Checking' },
+      { count: 9, vendorId: null },
+    ]);
+    expect(tallies.get('v-kroger|Expense')).toEqual({ 'acct:code:6100': 4 + DECISION_WEIGHT, 'acct:code:6150': 2 * DECISION_WEIGHT, [`due:${LEB}`]: DECISION_WEIGHT });
+    // The bank side of the same purchases is tallied separately.
+    expect(tallies.get('v-kroger|Asset')).toEqual({ 'acct:code:1000': 5 });
+    expect(labels.get('code:6150')).toEqual({ code: '6150', name: 'Breakroom' });
+  });
+
+  test('strong history elsewhere suggests Reclassify; matching history confirms', () => {
+    const history = hist([{ count: 19, accountKey: 'code:6150', accountCode: '6150', accountName: 'Breakroom' }]);
+    const [moved, kept] = classify([acctLine(), acctLine({ lineId: 'l2', accountKey: 'code:6150', accountCode: '6150', accountName: 'Breakroom' })], history);
+    expect(moved).toMatchObject({
+      status: 'LikelyMisclassified', source: 'History', suggestedAction: 'Reclassify', suggestedAccountCode: '6150',
+      suggestedAccountName: 'Breakroom', confidence: 0.95, currentEntityId: MIL, suggestedEntityId: null,
+    });
+    expect(moved.reasons[0]).toBe('History: 100% of 19 weighted past Expense lines for this vendor went to 6150 Breakroom');
+    expect(kept).toMatchObject({ status: 'Confirmed', suggestedAction: 'Keep' });
+  });
+
+  test("another entity's keyword in the memo suggests Due To/From that entity", () => {
+    const [r] = classify([acctLine({ memo: 'Main St office supplies' })], hist([]));
+    expect(r).toMatchObject({
+      status: 'LikelyMisclassified', source: 'Keyword', suggestedAction: 'DueToFrom', suggestedEntityId: LEB,
+      suggestedAccountCode: '1500', suggestedAccountName: 'Due From Lebanon', confidence: 0.92,
+    });
+  });
+
+  test("the file's own entity is never suggested, and a line already in the Due To/From account is confirmed", () => {
+    expect(classify([acctLine({ memo: 'Route 50 order' })], hist([]))[0]).toMatchObject({ status: 'NeedsEvidence', suggestedAction: null, source: 'None' });
+    const [r] = classify([acctLine({ memo: 'Main St', accountKey: 'code:1500', accountCode: '1500', accountName: 'Due From Lebanon' })], hist([]));
+    expect(r).toMatchObject({ status: 'Confirmed', suggestedAction: 'Keep' });
+  });
+
+  test('a Due To/From suggestion without a set-up account says so', () => {
+    const [r] = classify([acctLine({ memo: 'Lawrenceberg lunch' })], hist([]));
+    expect(r).toMatchObject({ suggestedAction: 'DueToFrom', suggestedEntityId: LAW, suggestedAccountName: null });
+    expect(r.reasons).toContain('Set the Due To/From account for Lawrenceburg to approve this');
+  });
+
+  test('stronger history beats a weak entity-name mention; two strong signals that disagree are a Conflict', () => {
+    const strongHere = hist([{ count: 19 }]);
+    // "Lebanon" alone is a bare name (85%); history says 6100 at 95%.
+    expect(classify([acctLine({ memo: 'Lebanon' })], strongHere)[0]).toMatchObject({ status: 'Confirmed', source: 'History', suggestedAction: 'Keep' });
+    // A keyword (92%) against 95% history elsewhere.
+    const strongElsewhere = hist([{ count: 19, accountKey: 'code:6150', accountCode: '6150', accountName: 'Breakroom' }]);
+    const [r] = classify([acctLine({ memo: 'Main St' })], strongElsewhere);
+    expect(r.status).toBe('Conflict');
+    expect(r.reasons).toContain('Conflict: the memo says Due To/From Lebanon, history says 6150 Breakroom');
+  });
+
+  test('thin history stays below the threshold', () => {
+    const [r] = classify([acctLine()], hist([{ count: 2, accountKey: 'code:6150', accountCode: '6150', accountName: 'Breakroom' }]));
+    expect(r).toMatchObject({ status: 'NeedsEvidence', suggestedAction: 'Reclassify', confidenceLevel: 'Low' });
+  });
+  test('Due To/From accounts are recognized by name, using entity names, aliases and keywords', () => {
+    const terms = buildEntityTerms(ENTITIES);
+    expect(dueAccountEntity(terms, '114008 Due from Lebanon')).toBe(LEB);
+    expect(dueAccountEntity(terms, '274005 Due to Milford Pediatric Dentistry')).toBe(MIL);
+    // The misspelled alias still finds Lawrenceburg.
+    expect(dueAccountEntity(terms, 'Due from Lawrenceberg')).toBe(LAW);
+    expect(dueAccountEntity(terms, 'Due to Benco')).toBeNull();
+    expect(dueAccountEntity(terms, 'Dues, Licenses & Subscriptions')).toBeNull();
+    expect(dueAccountEntity(terms, 'Lebanon Rent')).toBeNull();
+  });
+
+  test('detectDueToFromAccounts prefers "Due from" and skips the file\'s own entity', () => {
+    const found = detectDueToFromAccounts(ENTITIES, MIL, [
+      { key: 'code:274008', code: '274008', name: 'Due to Lebanon' },
+      { key: 'code:114008', code: '114008', name: 'Due from Lebanon' },
+      { key: 'code:114009', code: '114009', name: 'Due from Milford' },
+      { key: 'code:274010', code: '274010', name: 'Due to Lawrenceberg' },
+    ]);
+    expect([...found.keys()].sort()).toEqual([LAW, LEB].sort());
+    expect(found.get(LEB)).toEqual({ accountKey: 'code:114008', code: '114008', name: 'Due from Lebanon' });
+    expect(found.get(LAW).name).toBe('Due to Lawrenceberg');
+  });
+
+  test('a line in a "Due to <entity>" account counts as Due To/From that entity, and so does its history', () => {
+    const dueTo = { accountKey: 'code:274008', accountCode: '274008', accountName: 'Due to Lebanon', accountType: 'Liability' };
+    const history = hist([{ count: 19, ...dueTo }]);
+    // Saved default for Lebanon is the "Due From" account; the line sits in "Due to".
+    const [r] = classify([acctLine({ ...dueTo, memo: 'Main St' })], history);
+    expect(r).toMatchObject({ status: 'Confirmed', suggestedAction: 'Keep' });
+    expect(r.reasons).toContain('History: 100% of 19 weighted past Liability lines for this vendor went to Due To/From Lebanon');
   });
 });

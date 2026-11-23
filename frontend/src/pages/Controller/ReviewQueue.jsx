@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Alert,
+  Autocomplete,
   Box,
   Button,
   Checkbox,
@@ -11,6 +12,7 @@ import {
   DialogContent,
   DialogContentText,
   DialogTitle,
+  FormControlLabel,
   IconButton,
   Link,
   ListItemText,
@@ -38,9 +40,11 @@ import useControllerGroup from '../../hooks/useControllerGroup';
 import ControllerGroupSelect from '../../components/controller/ControllerGroupSelect';
 import {
   getControllerOverview,
+  getReviewAccounts,
   getReviewSettings,
   listReviewLines,
   listReviewRuns,
+  saveDueToFromAccount,
   saveReviewDecisions,
   saveReviewSettings,
   startReviewRun,
@@ -62,7 +66,23 @@ const ACTION_TEXT = {
   Approve: 'Approve recommendation',
   Keep: 'Keep current class',
   Reassign: 'Set entity',
+  Reclassify: 'Reclassify',
+  DueToFrom: 'Due To/From',
 };
+// Class review: the management file (class -> entity). Account review:
+// files without classes (right account, or another entity's).
+const keepText = (kind) => (kind === 'Account' ? 'Keep as is' : 'Keep current class');
+
+export const formatAccount = (a) => (a ? [a.code, a.name].filter(Boolean).join(' ') : '—');
+const sameAccount = (a, b) => Boolean(a && b) && (a.code || null) === (b.code || null) && a.name === b.name;
+
+// What an account-review suggestion would do, in words.
+export function describeSuggestion(line, entityName) {
+  if (line.suggestedAction === 'Keep') return `Keep in ${formatAccount({ code: line.accountCode, name: line.accountName })}`;
+  if (line.suggestedAction === 'Reclassify') return `Reclassify to ${formatAccount(line.suggestedAccount)}`;
+  if (line.suggestedAction === 'DueToFrom') return `Due To/From ${entityName(line.suggestedEntityId)}`;
+  return '—';
+}
 
 const errorText = (err) => err?.response?.data?.message || err?.message;
 
@@ -99,8 +119,191 @@ export function describeDecision(decision, entityName) {
   if (decision.action === 'Split') {
     return `Split: ${decision.allocations.map((a) => `${entityName(a.entityId)} ${formatCurrency(a.amount)}`).join(', ')}`;
   }
+  if (decision.action === 'Reclassify') return `Reclassified to ${formatAccount(decision.targetAccount)}`;
+  if (decision.action === 'DueToFrom') {
+    return `Due To/From ${entityName(decision.counterpartyEntityId)} (${formatAccount(decision.targetAccount)})`;
+  }
+  if (decision.action === 'Keep' && !decision.entityId) return 'Kept as is';
   const verb = { Approve: 'Approved', Keep: 'Kept', Reassign: 'Set to' }[decision.action] || decision.action;
   return `${verb}: ${entityName(decision.entityId)}`;
+}
+
+function AccountPicker({ accounts, value, onChange, label = 'Account' }) {
+  return (
+    <Autocomplete
+      size="small"
+      options={accounts}
+      value={value}
+      onChange={(_, v) => onChange(v)}
+      getOptionLabel={formatAccount}
+      isOptionEqualToValue={sameAccount}
+      groupBy={(a) => a.type}
+      renderInput={(params) => <TextField {...params} label={label} />}
+      sx={{ mt: 1 }}
+    />
+  );
+}
+
+function ReclassifyDialog({ open, title, accounts, onClose, onSave }) {
+  const [account, setAccount] = useState(null);
+  useEffect(() => {
+    if (open) setAccount(null);
+  }, [open]);
+  return (
+    <Dialog open={open} onClose={onClose} fullWidth maxWidth="sm">
+      <DialogTitle>{title}</DialogTitle>
+      <DialogContent>
+        <AccountPicker accounts={accounts} value={account} onChange={setAccount} label="Move to account" />
+      </DialogContent>
+      <DialogActions>
+        <Button onClick={onClose}>Cancel</Button>
+        <Button variant="contained" disabled={!account} onClick={() => onSave(account)}>
+          Reclassify
+        </Button>
+      </DialogActions>
+    </Dialog>
+  );
+}
+
+// The saved Due To/From account for an entity, and the one found by name.
+const savedDue = (info, id) => info?.dueToFrom?.find((d) => d.entityId === id)?.account || null;
+const detectedDue = (info, id) => info?.detectedDueToFrom?.find((d) => d.entityId === id)?.account || null;
+
+// Pick the other entity; its Due To/From account in this file is filled in
+// (saved default, else the account named for it). A different account is
+// used for these lines, and becomes the default if "Make this the default"
+// is ticked.
+function DueToFromDialog({ open, title, entities, accountsInfo, onClose, onSave }) {
+  const [entityId, setEntityId] = useState('');
+  const [account, setAccount] = useState(null);
+  const [remember, setRemember] = useState(true);
+  useEffect(() => {
+    if (open) {
+      setEntityId('');
+      setAccount(null);
+    }
+  }, [open]);
+  const saved = (id) => savedDue(accountsInfo, id);
+  const others = entities.filter((e) => e.entityId !== accountsInfo?.ownerEntityId);
+  const changed = entityId && account && !sameAccount(account, saved(entityId));
+  return (
+    <Dialog open={open} onClose={onClose} fullWidth maxWidth="sm">
+      <DialogTitle>{title}</DialogTitle>
+      <DialogContent>
+        <Select
+          fullWidth
+          size="small"
+          displayEmpty
+          value={entityId}
+          onChange={(e) => {
+            const id = e.target.value;
+            setEntityId(id);
+            setAccount(saved(id) || detectedDue(accountsInfo, id));
+            setRemember(!saved(id));
+          }}
+          sx={{ mt: 1 }}
+          inputProps={{ 'aria-label': 'Other entity' }}
+        >
+          <MenuItem value="" disabled>
+            Which entity does this belong to?
+          </MenuItem>
+          {others.map((e) => (
+            <MenuItem key={e.entityId} value={e.entityId}>
+              {e.entityName}
+            </MenuItem>
+          ))}
+        </Select>
+        {entityId && (
+          <>
+            <AccountPicker accounts={accountsInfo?.accounts || []} value={account} onChange={setAccount} label="Due To/From account in this file" />
+            {changed ? (
+              <FormControlLabel
+                control={<Checkbox size="small" checked={remember} onChange={(e) => setRemember(e.target.checked)} />}
+                label="Make this the default Due To/From account for this entity"
+              />
+            ) : (
+              <Typography variant="caption" color="text.secondary">
+                The default Due To/From account for this entity in this file.
+              </Typography>
+            )}
+          </>
+        )}
+      </DialogContent>
+      <DialogActions>
+        <Button onClick={onClose}>Cancel</Button>
+        <Button
+          variant="contained"
+          disabled={!entityId || !account}
+          onClick={() => onSave({ counterpartyEntityId: entityId, ...(changed ? { account, rememberAccount: remember } : {}) })}
+        >
+          Save
+        </Button>
+      </DialogActions>
+    </Dialog>
+  );
+}
+
+// Every other entity's Due To/From account in one file.
+function DueToFromSetupDialog({ open, groupId, qboId, qboName, entities, accountsInfo, onClose }) {
+  const [form, setForm] = useState({});
+  const [error, setError] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const saved = useCallback((id) => savedDue(accountsInfo, id), [accountsInfo]);
+  const others = entities.filter((e) => e.entityId !== accountsInfo?.ownerEntityId);
+  useEffect(() => {
+    if (open) {
+      setError(null);
+      // Unsaved entities start with the account named for them, if any.
+      setForm(Object.fromEntries(entities.map((e) => [e.entityId, saved(e.entityId) || detectedDue(accountsInfo, e.entityId)])));
+    }
+  }, [open, entities, saved, accountsInfo]);
+
+  const save = async () => {
+    setSaving(true);
+    setError(null);
+    try {
+      for (const e of others) {
+        const next = form[e.entityId] || null;
+        const prev = saved(e.entityId);
+        if (!(next === prev || sameAccount(next, prev))) {
+          await saveDueToFromAccount(groupId, qboId, e.entityId, next ? { code: next.code, name: next.name } : null);
+        }
+      }
+      onClose(true);
+    } catch (err) {
+      setError(err);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Dialog open={open} onClose={() => onClose(false)} fullWidth maxWidth="sm">
+      <DialogTitle>Due To/From accounts in {qboName}</DialogTitle>
+      <DialogContent>
+        {error && <Alert severity="error" sx={{ mb: 2 }}>{errorText(error)}</Alert>}
+        <DialogContentText sx={{ mb: 1 }}>
+          For each other entity, the account in this file that holds what is due to or from it. Accounts named
+          &quot;Due from/to &lt;entity&gt;&quot; are filled in for you; Save keeps them.
+        </DialogContentText>
+        {others.map((e) => (
+          <AccountPicker
+            key={e.entityId}
+            accounts={accountsInfo?.accounts || []}
+            value={form[e.entityId] || null}
+            onChange={(v) => setForm((f) => ({ ...f, [e.entityId]: v }))}
+            label={e.entityName}
+          />
+        ))}
+      </DialogContent>
+      <DialogActions>
+        <Button onClick={() => onClose(false)}>Cancel</Button>
+        <Button variant="contained" onClick={save} disabled={saving}>
+          Save
+        </Button>
+      </DialogActions>
+    </Dialog>
+  );
 }
 
 function SettingsDialog({ open, groupId, onClose }) {
@@ -279,9 +482,15 @@ export default function ReviewQueue() {
   const [splitLine, setSplitLine] = useState(null);
   const [confirmBulk, setConfirmBulk] = useState(null); // action
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [accountsInfo, setAccountsInfo] = useState(null);
+  const [reclassifyDialog, setReclassifyDialog] = useState(null); // { lineIds } | { bulk: true }
+  const [dueDialog, setDueDialog] = useState(null); // { lineIds } | { bulk: true }
+  const [dueSetupOpen, setDueSetupOpen] = useState(false);
 
-  const classFiles = useMemo(() => (overview?.qbos || []).filter((q) => q.isClassBased), [overview]);
+  const files = useMemo(() => overview?.qbos || [], [overview]);
+  const file = files.find((q) => q.qboId === qboId) || null;
   const run = runsInfo?.runs?.[0] || null;
+  const kind = data?.run?.reviewKind || (file && !file.isClassBased ? 'Account' : 'Class');
 
   useEffect(() => {
     setOverview(null);
@@ -290,11 +499,26 @@ export default function ReviewQueue() {
     getControllerOverview(groupId)
       .then((ov) => {
         setOverview(ov);
-        const files = ov.qbos.filter((q) => q.isClassBased);
-        if (files.length === 1) setQboId(files[0].qboId);
+        // Start on the management (class-based) file when there is one.
+        const classFiles = ov.qbos.filter((q) => q.isClassBased);
+        if (classFiles.length === 1) setQboId(classFiles[0].qboId);
+        else if (ov.qbos.length === 1) setQboId(ov.qbos[0].qboId);
       })
       .catch(setError);
   }, [groupId]);
+
+  const loadAccounts = useCallback(async () => {
+    setAccountsInfo(null);
+    if (!groupId || !qboId) return;
+    try {
+      setAccountsInfo(await getReviewAccounts(groupId, qboId));
+    } catch (err) {
+      setError(err);
+    }
+  }, [groupId, qboId]);
+  useEffect(() => {
+    loadAccounts();
+  }, [loadAccounts]);
 
   const loadRuns = useCallback(async () => {
     if (!groupId || !qboId || !month) return;
@@ -345,7 +569,7 @@ export default function ReviewQueue() {
   }, [queryParams, page, run]);
   useEffect(() => setPage(0), [queryParams]);
 
-  const entities = data?.entities || [];
+  const entities = useMemo(() => data?.entities || [], [data]);
   const entityName = useCallback((id) => entities.find((e) => e.entityId === id)?.entityName || '—', [entities]);
 
   const runReview = async () => {
@@ -372,10 +596,13 @@ export default function ReviewQueue() {
         s.alreadyDecided && `${s.alreadyDecided} already decided`,
         s.watchMode && `${s.watchMode} from watch-mode vendors`,
         s.nothingToApply && `${s.nothingToApply} with nothing to apply`,
+        s.noDueToFromAccount && `${s.noDueToFromAccount} needing a Due To/From account`,
       ].filter(Boolean);
       setNotice(`${label}: ${result.decided} line${result.decided === 1 ? '' : 's'}${skippedText.length ? ` (skipped ${skippedText.join(', ')})` : ''}.`);
       setSelected(new Set());
       setAllMatching(false);
+      // A Due To/From decision with an account also saves that account.
+      if (body.account && body.action === 'DueToFrom' && body.rememberAccount !== false) await loadAccounts();
       await loadLines();
     } catch (err) {
       setError(err);
@@ -384,12 +611,18 @@ export default function ReviewQueue() {
     }
   };
 
-  const bulk = (action, entityId) => {
+  // extra: { entityId } | { account } | { counterpartyEntityId, account? }
+  const bulk = (action, extra = {}) => {
     const body = allMatching
-      ? { action, filter: queryParams, expectedCount: data.total, ...(entityId ? { entityId } : {}) }
-      : { action, lineIds: [...selected], ...(entityId ? { entityId } : {}) };
-    return decide(body, ACTION_TEXT[action]);
+      ? { action, filter: queryParams, expectedCount: data.total, ...extra }
+      : { action, lineIds: [...selected], ...extra };
+    return decide(body, action === 'Keep' ? keepText(kind) : ACTION_TEXT[action]);
   };
+  // A line dialog's target: the selection (bulk) or the given lines.
+  const applyTo = (target, action, extra) =>
+    target.bulk ? bulk(action, extra) : decide({ action, lineIds: target.lineIds, ...extra }, ACTION_TEXT[action]);
+  const closeMenu = () => setMenu({ anchor: null, line: null });
+  const canApprove = (l) => (kind === 'Account' ? Boolean(l.suggestedAction) : Boolean(l.suggestedEntityId || l.currentEntityId));
 
   const pageIds = (data?.lines || []).map((l) => l.lineId);
   const allPageSelected = pageIds.length > 0 && pageIds.every((id) => selected.has(id));
@@ -421,17 +654,17 @@ export default function ReviewQueue() {
 
       {overview && (
         <Paper variant="outlined" sx={{ p: 2, mb: 2 }}>
-          {classFiles.length === 0 ? (
-            <Typography color="text.secondary">No class-based QBO file in this Group.</Typography>
+          {files.length === 0 ? (
+            <Typography color="text.secondary">No QBO file in this Group.</Typography>
           ) : (
             <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap', alignItems: 'center' }}>
-              <Select size="small" displayEmpty value={qboId} onChange={(e) => setQboId(e.target.value)} sx={{ minWidth: 220 }} inputProps={{ 'aria-label': 'QBO file' }}>
+              <Select size="small" displayEmpty value={qboId} onChange={(e) => setQboId(e.target.value)} sx={{ minWidth: 260 }} inputProps={{ 'aria-label': 'QBO file' }}>
                 <MenuItem value="" disabled>
                   Select a QBO file
                 </MenuItem>
-                {classFiles.map((q) => (
+                {files.map((q) => (
                   <MenuItem key={q.qboId} value={q.qboId}>
-                    {q.qboName}
+                    {q.qboName} ({q.isClassBased ? 'class review' : 'account review'})
                   </MenuItem>
                 ))}
               </Select>
@@ -454,7 +687,20 @@ export default function ReviewQueue() {
                   Last run {new Date(run.runDate).toLocaleString()} · {run.lineCount.toLocaleString()} lines
                 </Typography>
               )}
+              <Box sx={{ flex: 1 }} />
+              {qboId && accountsInfo && (
+                <Button size="small" onClick={() => setDueSetupOpen(true)} disabled={!entities.length}>
+                  Due To/From accounts
+                </Button>
+              )}
             </Box>
+          )}
+          {file && (
+            <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>
+              {file.isClassBased
+                ? 'Class review: which entity each line belongs to. You can also reclassify lines or mark them Due To/From another entity.'
+                : 'Account review: whether each line is in the right account, or belongs to another entity (Due To/From).'}
+            </Typography>
           )}
           {run?.isStale && (
             <Alert severity="info" sx={{ mt: 2 }}>
@@ -467,7 +713,7 @@ export default function ReviewQueue() {
       {data && (
         <>
           <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap', mb: 2 }}>
-            {Object.entries(STATUS_INFO).map(([status, info]) => {
+            {Object.entries(STATUS_INFO).filter(([status]) => !(kind === 'Account' && status === 'Unclassified')).map(([status, info]) => {
               const s = data.summary[status];
               const on = filters.status.includes(status);
               return (
@@ -534,10 +780,18 @@ export default function ReviewQueue() {
               Approve recommendation
             </Button>
             <Button size="small" disabled={!selectionCount || Boolean(busy)} onClick={() => (allMatching ? setConfirmBulk('Keep') : bulk('Keep'))}>
-              Keep current class
+              {keepText(kind)}
             </Button>
-            <Button size="small" disabled={!selectionCount || Boolean(busy)} onClick={() => setEntityDialog({ bulk: true })}>
-              Set entity…
+            {kind === 'Class' && (
+              <Button size="small" disabled={!selectionCount || Boolean(busy)} onClick={() => setEntityDialog({ bulk: true })}>
+                Set entity…
+              </Button>
+            )}
+            <Button size="small" disabled={!selectionCount || Boolean(busy) || !accountsInfo} onClick={() => setReclassifyDialog({ bulk: true })}>
+              Reclassify…
+            </Button>
+            <Button size="small" disabled={!selectionCount || Boolean(busy) || !accountsInfo} onClick={() => setDueDialog({ bulk: true })}>
+              Due To/From…
             </Button>
           </Paper>
 
@@ -561,7 +815,7 @@ export default function ReviewQueue() {
                   <TableCell>Memo</TableCell>
                   <TableCell>Account</TableCell>
                   <TableCell align="right">Amount</TableCell>
-                  <TableCell>Class now</TableCell>
+                  {kind === 'Class' && <TableCell>Class now</TableCell>}
                   <TableCell>Suggested</TableCell>
                   <TableCell>Status</TableCell>
                   <TableCell>Decision</TableCell>
@@ -591,9 +845,9 @@ export default function ReviewQueue() {
                       </Typography>
                     </TableCell>
                     <TableCell align="right">{formatCurrency(l.amount)}</TableCell>
-                    <TableCell>{l.className || <Box component="span" sx={{ color: 'text.disabled' }}>—</Box>}</TableCell>
+                    {kind === 'Class' && <TableCell>{l.className || <Box component="span" sx={{ color: 'text.disabled' }}>—</Box>}</TableCell>}
                     <TableCell>
-                      {l.suggestedEntityId ? entityName(l.suggestedEntityId) : '—'}
+                      {kind === 'Account' ? describeSuggestion(l, entityName) : l.suggestedEntityId ? entityName(l.suggestedEntityId) : '—'}
                       {l.confidence > 0 && (
                         <Typography variant="caption" color="text.secondary" display="block">
                           {confidenceLabel(l.confidence, data.run.threshold, data.run.mediumThreshold)}
@@ -609,7 +863,7 @@ export default function ReviewQueue() {
                     <TableCell sx={{ whiteSpace: 'nowrap' }}>
                       <Tooltip title="Approve recommendation">
                         <span>
-                          <IconButton size="small" aria-label={`Approve ${l.lineId}`} disabled={Boolean(busy) || (!l.suggestedEntityId && !l.currentEntityId)} onClick={() => decide({ action: 'Approve', lineIds: [l.lineId] }, ACTION_TEXT.Approve)}>
+                          <IconButton size="small" aria-label={`Approve ${l.lineId}`} disabled={Boolean(busy) || !canApprove(l)} onClick={() => decide({ action: 'Approve', lineIds: [l.lineId] }, ACTION_TEXT.Approve)}>
                             <CheckIcon fontSize="small" />
                           </IconButton>
                         </span>
@@ -636,19 +890,29 @@ export default function ReviewQueue() {
 
       <Menu anchorEl={menu.anchor} open={Boolean(menu.anchor)} onClose={() => setMenu({ anchor: null, line: null })}>
         {menu.line && [
-          <MenuItem key="keep" disabled={!menu.line.currentEntityId} onClick={() => { decide({ action: 'Keep', lineIds: [menu.line.lineId] }, ACTION_TEXT.Keep); setMenu({ anchor: null, line: null }); }}>
-            Keep current class
+          <MenuItem key="keep" disabled={kind === 'Class' && !menu.line.currentEntityId} onClick={() => { decide({ action: 'Keep', lineIds: [menu.line.lineId] }, keepText(kind)); closeMenu(); }}>
+            {keepText(kind)}
           </MenuItem>,
-          <MenuItem key="set" onClick={() => { setEntityDialog({ lineIds: [menu.line.lineId] }); setMenu({ anchor: null, line: null }); }}>
-            Set entity…
+          kind === 'Class' && (
+            <MenuItem key="set" onClick={() => { setEntityDialog({ lineIds: [menu.line.lineId] }); closeMenu(); }}>
+              Set entity…
+            </MenuItem>
+          ),
+          kind === 'Class' && (
+            <MenuItem key="split" onClick={() => { setSplitLine(menu.line); closeMenu(); }}>
+              Split…
+            </MenuItem>
+          ),
+          <MenuItem key="reclassify" disabled={!accountsInfo} onClick={() => { setReclassifyDialog({ lineIds: [menu.line.lineId] }); closeMenu(); }}>
+            Reclassify…
           </MenuItem>,
-          <MenuItem key="split" onClick={() => { setSplitLine(menu.line); setMenu({ anchor: null, line: null }); }}>
-            Split…
+          <MenuItem key="due" disabled={!accountsInfo} onClick={() => { setDueDialog({ lineIds: [menu.line.lineId] }); closeMenu(); }}>
+            Due To/From…
           </MenuItem>,
-          <MenuItem key="undo" disabled={!menu.line.decision} onClick={() => { decide({ action: 'Undo', lineIds: [menu.line.lineId] }, 'Undone'); setMenu({ anchor: null, line: null }); }}>
+          <MenuItem key="undo" disabled={!menu.line.decision} onClick={() => { decide({ action: 'Undo', lineIds: [menu.line.lineId] }, 'Undone'); closeMenu(); }}>
             Undo decision
           </MenuItem>,
-        ]}
+        ].filter(Boolean)}
       </Menu>
 
       <EntityDialog
@@ -659,10 +923,52 @@ export default function ReviewQueue() {
         onSave={(entityId) => {
           const target = entityDialog;
           setEntityDialog(null);
-          if (target.bulk) bulk('Reassign', entityId);
-          else decide({ action: 'Reassign', entityId, lineIds: target.lineIds }, ACTION_TEXT.Reassign);
+          applyTo(target, 'Reassign', { entityId });
         }}
       />
+      <ReclassifyDialog
+        open={Boolean(reclassifyDialog)}
+        title={reclassifyDialog?.bulk ? `Reclassify ${selectionCount.toLocaleString()} lines` : 'Reclassify'}
+        accounts={accountsInfo?.accounts || []}
+        onClose={() => setReclassifyDialog(null)}
+        onSave={(account) => {
+          const target = reclassifyDialog;
+          setReclassifyDialog(null);
+          applyTo(target, 'Reclassify', { account: { code: account.code, name: account.name } });
+        }}
+      />
+      <DueToFromDialog
+        open={Boolean(dueDialog)}
+        title={dueDialog?.bulk ? `Due To/From for ${selectionCount.toLocaleString()} lines` : 'Due To/From another entity'}
+        entities={entities}
+        accountsInfo={accountsInfo}
+        onClose={() => setDueDialog(null)}
+        onSave={({ counterpartyEntityId, account, rememberAccount }) => {
+          const target = dueDialog;
+          setDueDialog(null);
+          applyTo(target, 'DueToFrom', {
+            counterpartyEntityId,
+            ...(account ? { account: { code: account.code, name: account.name }, rememberAccount } : {}),
+          });
+        }}
+      />
+      {qboId && (
+        <DueToFromSetupDialog
+          open={dueSetupOpen}
+          groupId={groupId}
+          qboId={qboId}
+          qboName={file?.qboName}
+          entities={entities}
+          accountsInfo={accountsInfo}
+          onClose={(saved) => {
+            setDueSetupOpen(false);
+            if (saved) {
+              setNotice('Due To/From accounts saved. Run the review again to use them in suggestions.');
+              loadAccounts();
+            }
+          }}
+        />
+      )}
       <SplitDialog
         line={splitLine}
         entities={entities}
@@ -674,7 +980,7 @@ export default function ReviewQueue() {
         }}
       />
       <Dialog open={Boolean(confirmBulk)} onClose={() => setConfirmBulk(null)}>
-        <DialogTitle>{ACTION_TEXT[confirmBulk]}</DialogTitle>
+        <DialogTitle>{confirmBulk === 'Keep' ? keepText(kind) : ACTION_TEXT[confirmBulk]}</DialogTitle>
         <DialogContent>
           <DialogContentText>
             Apply to all {data?.total.toLocaleString()} matching lines? Lines you have already decided and lines from watch-mode vendors are skipped.
