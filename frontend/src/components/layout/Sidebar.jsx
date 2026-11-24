@@ -23,6 +23,8 @@ import ApartmentOutlinedIcon from '@mui/icons-material/ApartmentOutlined';
 import UploadFileOutlinedIcon from '@mui/icons-material/UploadFileOutlined';
 import RuleOutlinedIcon from '@mui/icons-material/RuleOutlined';
 import StorefrontOutlinedIcon from '@mui/icons-material/StorefrontOutlined';
+import CompareArrowsOutlinedIcon from '@mui/icons-material/CompareArrowsOutlined';
+import InsightsOutlinedIcon from '@mui/icons-material/InsightsOutlined';
 import { useAuth } from '../../context/AuthContext';
 
 export const SIDEBAR_WIDTH = 240;
@@ -39,7 +41,9 @@ const controllerItems = [
   { label: 'Ledger Browser', path: '/controller/ledger', icon: <ListAltOutlinedIcon fontSize="small" /> },
   { label: 'Upload GL', path: '/controller/upload', icon: <UploadFileOutlinedIcon fontSize="small" /> },
   { label: 'Review', path: '/controller/review', icon: <RuleOutlinedIcon fontSize="small" /> },
+  { label: 'Conflicts', path: '/controller/conflicts', icon: <CompareArrowsOutlinedIcon fontSize="small" /> },
   { label: 'Vendors', path: '/controller/vendors', icon: <StorefrontOutlinedIcon fontSize="small" /> },
+  { label: 'Trends', path: '/controller/trends', icon: <InsightsOutlinedIcon fontSize="small" /> },
   { label: 'Entities', path: '/controller/entities', icon: <ApartmentOutlinedIcon fontSize="small" /> },
 ];
 

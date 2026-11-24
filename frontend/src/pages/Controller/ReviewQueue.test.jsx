@@ -1,6 +1,7 @@
 import { describe, test, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { MemoryRouter } from 'react-router-dom';
 
 vi.mock('../../api/controller', () => ({
   getControllerOverview: vi.fn(),
@@ -18,10 +19,12 @@ vi.mock('../../api/settings', () => ({ listGroups: vi.fn() }));
 import {
   getControllerOverview,
   getReviewAccounts,
+  getReviewSettings,
   listReviewLines,
   saveDueToFromAccount,
   listReviewRuns,
   saveReviewDecisions,
+  saveReviewSettings,
   startReviewRun,
 } from '../../api/controller';
 import { listGroups } from '../../api/settings';
@@ -105,7 +108,7 @@ describe('ReviewQueue page', () => {
 
   test('loads the latest run for the class-based file, filtered to open Expense lines', async () => {
     listReviewLines.mockResolvedValue(linesResponse([line()]));
-    render(<ReviewQueue />);
+    render(<ReviewQueue />, { wrapper: MemoryRouter });
     expect(await screen.findByText('Breakroom')).toBeInTheDocument();
     expect(listReviewRuns).toHaveBeenCalledWith('g1', 'mgmt', expect.stringMatching(/^\d{4}-\d{2}$/));
     expect(listReviewLines).toHaveBeenCalledWith('g1', expect.objectContaining({ runId: 'run-1', reviewState: 'open', accountType: 'Expense', offset: 0 }));
@@ -116,7 +119,7 @@ describe('ReviewQueue page', () => {
   test('approving one line records a decision for that line', async () => {
     const user = userEvent.setup();
     listReviewLines.mockResolvedValue(linesResponse([line()]));
-    render(<ReviewQueue />);
+    render(<ReviewQueue />, { wrapper: MemoryRouter });
     await user.click(await screen.findByRole('button', { name: 'Approve l1' }));
     expect(saveReviewDecisions).toHaveBeenCalledWith('g1', { runId: 'run-1', action: 'Approve', lineIds: ['l1'] });
     expect(await screen.findByText(/Approve recommendation: 1 line\./)).toBeInTheDocument();
@@ -127,7 +130,7 @@ describe('ReviewQueue page', () => {
     const many = Array.from({ length: 3 }, (_, i) => line({ lineId: `l${i}`, status: 'Confirmed', memo: `m${i}` }));
     listReviewLines.mockResolvedValue(linesResponse(many, 250));
     saveReviewDecisions.mockResolvedValue({ decided: 248, skipped: { alreadyDecided: 0, watchMode: 2, nothingToApply: 0 } });
-    render(<ReviewQueue />);
+    render(<ReviewQueue />, { wrapper: MemoryRouter });
     await screen.findByText('m0');
 
     await user.click(screen.getByRole('checkbox', { name: 'Select page' }));
@@ -146,7 +149,7 @@ describe('ReviewQueue page', () => {
   test('split a line using the vendor template', async () => {
     const user = userEvent.setup();
     listReviewLines.mockResolvedValue(linesResponse([line({ splitTemplate: [{ entityId: 'leb', percent: 60 }, { entityId: 'mil', percent: 40 }] })]));
-    render(<ReviewQueue />);
+    render(<ReviewQueue />, { wrapper: MemoryRouter });
     await user.click(await screen.findByRole('button', { name: 'More actions for l1' }));
     await user.click(screen.getByRole('menuitem', { name: 'Split…' }));
     expect(screen.getByText('Adds up to the line amount.')).toBeInTheDocument();
@@ -159,7 +162,7 @@ describe('ReviewQueue page', () => {
   test('a split that does not add up cannot be saved', async () => {
     const user = userEvent.setup();
     listReviewLines.mockResolvedValue(linesResponse([line()]));
-    render(<ReviewQueue />);
+    render(<ReviewQueue />, { wrapper: MemoryRouter });
     await user.click(await screen.findByRole('button', { name: 'More actions for l1' }));
     await user.click(screen.getByRole('menuitem', { name: 'Split…' }));
     await user.type(screen.getByLabelText('Split amount 1'), '70');
@@ -173,7 +176,7 @@ describe('ReviewQueue page', () => {
     listReviewRuns.mockResolvedValueOnce({ latestSnapshot: { snapshotId: 's1' }, runs: [] });
     startReviewRun.mockResolvedValue({ lineCount: 251 });
     listReviewLines.mockResolvedValue(linesResponse([line()]));
-    render(<ReviewQueue />);
+    render(<ReviewQueue />, { wrapper: MemoryRouter });
     await user.click(await screen.findByRole('button', { name: 'Run review' }));
     expect(startReviewRun).toHaveBeenCalledWith('g1', 'mgmt', expect.any(String));
     await waitFor(() => expect(listReviewLines).toHaveBeenCalled());
@@ -219,7 +222,7 @@ describe('account review of a file without classes', () => {
   test('shows account suggestions and account actions (no class or entity actions)', async () => {
     const user = userEvent.setup();
     listReviewLines.mockResolvedValue(accountResponse([accountLine()]));
-    render(<ReviewQueue />);
+    render(<ReviewQueue />, { wrapper: MemoryRouter });
     expect(await screen.findByText('Reclassify to 6150 Breakroom')).toBeInTheDocument();
     expect(screen.getByRole('combobox', { name: 'QBO file' })).toHaveTextContent('Milford (account review)');
     expect(screen.queryByText('Class now')).not.toBeInTheDocument();
@@ -233,7 +236,7 @@ describe('account review of a file without classes', () => {
   test('reclassify one line to another account', async () => {
     const user = userEvent.setup();
     listReviewLines.mockResolvedValue(accountResponse([accountLine()]));
-    render(<ReviewQueue />);
+    render(<ReviewQueue />, { wrapper: MemoryRouter });
     await user.click(await screen.findByRole('button', { name: 'More actions for l1' }));
     await user.click(screen.getByRole('menuitem', { name: 'Reclassify…' }));
     await user.click(screen.getByLabelText('Move to account'));
@@ -247,7 +250,7 @@ describe('account review of a file without classes', () => {
   test("due to/from uses the entity's saved account (the file's own entity is not offered)", async () => {
     const user = userEvent.setup();
     listReviewLines.mockResolvedValue(accountResponse([accountLine()]));
-    render(<ReviewQueue />);
+    render(<ReviewQueue />, { wrapper: MemoryRouter });
     await user.click(await screen.findByRole('button', { name: 'More actions for l1' }));
     await user.click(screen.getByRole('menuitem', { name: 'Due To/From…' }));
     await user.click(screen.getByRole('combobox', { name: 'Other entity' }));
@@ -262,7 +265,7 @@ describe('account review of a file without classes', () => {
     const user = userEvent.setup();
     getReviewAccounts.mockResolvedValue({ ...ACCOUNTS, dueToFrom: [] });
     listReviewLines.mockResolvedValue(accountResponse([accountLine(), accountLine({ lineId: 'l2', memo: 'other' })]));
-    render(<ReviewQueue />);
+    render(<ReviewQueue />, { wrapper: MemoryRouter });
     await screen.findByText('other');
     await user.click(screen.getByRole('checkbox', { name: 'Select page' }));
     await user.click(screen.getByRole('button', { name: 'Due To/From…' }));
@@ -282,7 +285,7 @@ describe('account review of a file without classes', () => {
     const user = userEvent.setup();
     getReviewAccounts.mockResolvedValue({ ...ACCOUNTS, dueToFrom: [], detectedDueToFrom: [{ entityId: 'leb', account: { code: '1500', name: 'Due From Lebanon' } }] });
     listReviewLines.mockResolvedValue(accountResponse([accountLine()]));
-    render(<ReviewQueue />);
+    render(<ReviewQueue />, { wrapper: MemoryRouter });
     await user.click(await screen.findByRole('button', { name: 'More actions for l1' }));
     await user.click(screen.getByRole('menuitem', { name: 'Due To/From…' }));
     await user.click(screen.getByRole('combobox', { name: 'Other entity' }));
@@ -299,7 +302,7 @@ describe('account review of a file without classes', () => {
   test('a one-off account (e.g. Due To instead of Due From) is not made the default unless ticked', async () => {
     const user = userEvent.setup();
     listReviewLines.mockResolvedValue(accountResponse([accountLine()]));
-    render(<ReviewQueue />);
+    render(<ReviewQueue />, { wrapper: MemoryRouter });
     await user.click(await screen.findByRole('button', { name: 'More actions for l1' }));
     await user.click(screen.getByRole('menuitem', { name: 'Due To/From…' }));
     await user.click(screen.getByRole('combobox', { name: 'Other entity' }));
@@ -321,7 +324,7 @@ describe('account review of a file without classes', () => {
     getReviewAccounts.mockResolvedValue({ ...ACCOUNTS, dueToFrom: [] });
     saveDueToFromAccount.mockResolvedValue({});
     listReviewLines.mockResolvedValue(accountResponse([accountLine()]));
-    render(<ReviewQueue />);
+    render(<ReviewQueue />, { wrapper: MemoryRouter });
     await screen.findByText('Reclassify to 6150 Breakroom');
     await user.click(screen.getByRole('button', { name: 'Due To/From accounts' }));
     // One picker per other entity (not Milford, whose file this is).
@@ -331,5 +334,52 @@ describe('account review of a file without classes', () => {
     await user.click(screen.getByRole('button', { name: 'Save' }));
     expect(saveDueToFromAccount).toHaveBeenCalledWith('g1', 'mil-file', 'leb', { code: '1500', name: 'Due From Lebanon' });
     expect(await screen.findByText(/Due To\/From accounts saved/)).toBeInTheDocument();
+  });
+});
+
+describe('Phase 2b: drill-down links, conflicts prompt, trend settings', () => {
+  beforeEach(() => {
+    listGroups.mockResolvedValue([{ groupid: 'g1', groupname: 'APOHCO' }]);
+    getControllerOverview.mockResolvedValue({
+      qbos: [{ qboId: 'mgmt', qboName: 'APOHCO', isClassBased: true }, { qboId: 'wpd', qboName: 'WPD', isClassBased: false }],
+      snapshots: [],
+    });
+    listReviewRuns.mockResolvedValue({ latestSnapshot: { snapshotId: 's1' }, runs: [{ runId: 'run-1', runDate: '2026-11-23T10:00:00Z', lineCount: 5, isStale: false }] });
+    getReviewAccounts.mockResolvedValue(ACCOUNTS);
+  });
+  const at = (path) => ({ wrapper: ({ children }) => <MemoryRouter initialEntries={[path]}>{children}</MemoryRouter> });
+
+  test('a link with ?qboId=&month=&vendor= opens that file and month, filtered to the vendor (all lines)', async () => {
+    listReviewLines.mockResolvedValue(linesResponse([line()]));
+    render(<ReviewQueue />, at('/controller/review?qboId=wpd&month=2026-09&vendor=Kroger'));
+    await screen.findByText('Breakroom');
+    expect(listReviewRuns).toHaveBeenCalledWith('g1', 'wpd', '2026-09');
+    expect(listReviewLines).toHaveBeenCalledWith('g1', expect.objectContaining({ vendor: 'Kroger', reviewState: 'all' }));
+    expect(screen.getByLabelText('Vendor')).toHaveValue('Kroger');
+  });
+
+  test('open conflicts on a class review point to the Conflicts screen', async () => {
+    listReviewLines.mockResolvedValue({ ...linesResponse([line()]), summary: { ...summary, Conflict: { count: 2, open: 2, amount: 50 } } });
+    render(<ReviewQueue />, at('/controller/review?month=2026-10'));
+    const link = await screen.findByRole('link', { name: 'Resolve in Conflicts' });
+    expect(link).toHaveAttribute('href', '/controller/conflicts?qboId=mgmt&month=2026-10');
+  });
+
+  test('settings include the trend-check thresholds', async () => {
+    const user = userEvent.setup();
+    listReviewLines.mockResolvedValue(linesResponse([line()]));
+    getReviewSettings.mockResolvedValue({
+      threshold: 0.9, mediumThreshold: 0.7, historyMonths: 12, splitShiftPoints: 25, spikePercent: 50, spikeMinAmount: 500, recurringMonths: 3, baselineMonths: 6,
+    });
+    saveReviewSettings.mockResolvedValue({});
+    render(<ReviewQueue />, at('/controller/review'));
+    await user.click(await screen.findByRole('button', { name: 'Settings' }));
+    const spike = await screen.findByLabelText('Spend spike, at least ($)');
+    await user.clear(spike);
+    await user.type(spike, '750');
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+    expect(saveReviewSettings).toHaveBeenCalledWith('g1', {
+      threshold: 0.9, mediumThreshold: 0.7, historyMonths: 12, splitShiftPoints: 25, spikePercent: 50, spikeMinAmount: 750, recurringMonths: 3, baselineMonths: 6,
+    });
   });
 });

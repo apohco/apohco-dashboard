@@ -419,3 +419,35 @@ another entity?
 Both actions also work on the management file. Decisions are only recorded
 here; nothing is written to QuickBooks. Phase 5 turns them into recommended
 adjusting entries.
+
+### 9.8 Conflicts, vendor profiles and trends (Phase 2b)
+
+Deploy: `npm run db:migrate` applies `012_controller_conflicts_trends.sql`
+(RuleWins on vendor rules; Scope, RequestAje and Resolution on decisions;
+trend thresholds on review settings). `sam deploy` adds `ctrlConflicts`
+(`/api/controller/conflicts...`), `ctrlTrends` (`/api/controller/trends`),
+and two routes on `manageCtrlVendors`: GET `/vendors/{vendorId}` (profile)
+and POST `/vendors/{vendorId}/rules/test`. No new environment variables.
+
+**Controller → Conflicts**: lines where a vendor rule and strong history
+disagree (management file), with the rule and history side by side. For each:
+
+- **This transaction only:** decides the line; the rule and history stay as they are.
+- **Rule wins from now on:** saves a new rule version that takes priority
+  over history, and decides this month's open conflicts for the vendor.
+- **Rule wins and relabel history:** as above, and relabels every earlier
+  line of the vendor that disagrees with the rule (preview first). Relabeled
+  lines only request adjusting entries if **Request adjusting journal
+  entries** is ticked.
+
+**Controller → Vendors**: the list adds 12-month spend, % reviewed and
+average confidence (sortable). Click a vendor for its profile: spend by
+entity by month, approval rate, rule versions, relabels and corrections.
+**Test rule** in the edit dialog previews a rule over the last 3, 6 or 12
+months before you save it.
+
+**Controller → Trends**: spend by entity by month across every file (your
+decisions applied), each top vendor's split by entity, and the trend checks
+for a month: split shift, spend spike, new vendor, missing recurring charge,
+each linking to the lines in Review. Thresholds are in Review → Settings
+(start: 25 points; +50% and $500; 3 months; 6-month average).

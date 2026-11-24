@@ -84,7 +84,29 @@ export const getReviewAccounts = (groupId, qboId) =>
 export const saveDueToFromAccount = (groupId, qboId, counterpartyEntityId, account) =>
   apiClient.put('/api/controller/review/due-to-from', { groupId, qboId, counterpartyEntityId, account }).then((r) => r.data);
 
+// Conflicts (Phase 2b). resolution: 'LineOnly' | 'RuleWins' | 'RuleWinsRelabel'.
+export const listConflicts = (groupId, runId) =>
+  apiClient.get('/api/controller/conflicts', { params: { groupId, runId } }).then((r) => r.data);
+
+export const previewRelabel = (groupId, runId, lineId) =>
+  apiClient.post(`/api/controller/conflicts/${lineId}/preview`, { groupId, runId }).then((r) => r.data);
+
+// body: { resolution, entityId? (LineOnly), requestAje?, expectedRelabelCount? (RuleWinsRelabel), note? }
+export const resolveConflict = (groupId, runId, lineId, body) =>
+  apiClient.post(`/api/controller/conflicts/${lineId}/resolve`, { groupId, runId, ...body }).then((r) => r.data);
+
+// Trends (Phase 2b): month defaults to the latest stored month.
+export const getTrends = (groupId, month) =>
+  apiClient.get('/api/controller/trends', { params: { groupId, ...(month ? { month } : {}) } }).then((r) => r.data);
+
 // Vendors.
+export const getVendorProfile = (groupId, vendorId) =>
+  apiClient.get(`/api/controller/vendors/${vendorId}`, { params: { groupId } }).then((r) => r.data);
+
+// rule: { defaultEntityId, keywords }; months 3..12. Nothing is saved.
+export const testVendorRule = (groupId, vendorId, rule, months) =>
+  apiClient.post(`/api/controller/vendors/${vendorId}/rules/test`, { groupId, rule, months }).then((r) => r.data);
+
 export const listVendors = (groupId) =>
   apiClient.get('/api/controller/vendors', { params: { groupId } }).then((r) => r.data);
 

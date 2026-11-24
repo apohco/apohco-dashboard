@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Link as RouterLink, useSearchParams } from 'react-router-dom';
 import {
   Alert,
   Autocomplete,
@@ -49,7 +50,7 @@ import {
   saveReviewSettings,
   startReviewRun,
 } from '../../api/controller';
-import { addMonths, currentMonth, formatMonth } from '../../utils/months';
+import { addMonths, currentMonth, formatMonth, isMonth } from '../../utils/months';
 import { formatCurrency } from '../../utils/format';
 
 const PAGE_SIZE = 100;
@@ -315,7 +316,13 @@ function SettingsDialog({ open, groupId, onClose }) {
     if (!open) return;
     setError(null);
     getReviewSettings(groupId)
-      .then((s) => setForm({ threshold: Math.round(s.threshold * 100), mediumThreshold: Math.round(s.mediumThreshold * 100), historyMonths: s.historyMonths }))
+      .then((s) =>
+        setForm({
+          ...s,
+          threshold: Math.round(s.threshold * 100),
+          mediumThreshold: Math.round(s.mediumThreshold * 100),
+        })
+      )
       .catch(setError);
   }, [open, groupId]);
 
@@ -327,6 +334,11 @@ function SettingsDialog({ open, groupId, onClose }) {
         threshold: Number(form.threshold) / 100,
         mediumThreshold: Number(form.mediumThreshold) / 100,
         historyMonths: Number(form.historyMonths),
+        splitShiftPoints: Number(form.splitShiftPoints),
+        spikePercent: Number(form.spikePercent),
+        spikeMinAmount: Number(form.spikeMinAmount),
+        recurringMonths: Number(form.recurringMonths),
+        baselineMonths: Number(form.baselineMonths),
       });
       onClose(true);
     } catch (err) {
@@ -358,8 +370,19 @@ function SettingsDialog({ open, groupId, onClose }) {
             {field('threshold', 'High confidence threshold (%)', 'At or above this, a line is Confirmed or Likely misclassified.')}
             {field('mediumThreshold', 'Medium confidence from (%)', 'Below this, confidence shows as Low.')}
             {field('historyMonths', 'Months of history', 'How many earlier months the engine learns from (1–36).')}
-            <Typography variant="caption" color="text.secondary">
+            <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 2 }}>
               Changes apply the next time you run a review.
+            </Typography>
+            <Typography variant="subtitle2" sx={{ mb: 1.5 }}>
+              Trend checks
+            </Typography>
+            {field('splitShiftPoints', 'Split shift (percentage points)', "Flag a vendor when an entity's share moves this much vs its average.")}
+            {field('spikePercent', 'Spend spike (%)', "Flag an entity's spend in an account this far above its average…")}
+            {field('spikeMinAmount', 'Spend spike, at least ($)', '…and at least this many dollars above it.')}
+            {field('recurringMonths', 'Recurring after (months)', 'A vendor charged in each of this many previous months is recurring (2–12).')}
+            {field('baselineMonths', 'Average over (months)', 'How many earlier months the averages use (2–24).')}
+            <Typography variant="caption" color="text.secondary">
+              Trend checks use the new values right away.
             </Typography>
           </Box>
         )}
@@ -463,14 +486,17 @@ function SplitDialog({ line, entities, onClose, onSave }) {
 
 export default function ReviewQueue() {
   const { groupId, groups, groupsError, setGroupId } = useControllerGroup();
+  // Drill-down links (Trends, Conflicts): ?qboId=&month=&vendor=&account=
+  const [searchParams] = useSearchParams();
+  const drill = { vendor: searchParams.get('vendor') || '', account: searchParams.get('account') || '' };
   const [overview, setOverview] = useState(null);
   const [qboId, setQboId] = useState('');
-  const [month, setMonth] = useState(addMonths(currentMonth(), -1));
+  const [month, setMonth] = useState(isMonth(searchParams.get('month')) ? searchParams.get('month') : addMonths(currentMonth(), -1));
   const [runsInfo, setRunsInfo] = useState(null);
   const [data, setData] = useState(null);
   const [page, setPage] = useState(0);
-  const [filters, setFilters] = useState({ status: [], reviewState: 'open', accountType: ['Expense'], entityId: '' });
-  const [text, setText] = useState({ account: '', vendor: '', search: '' });
+  const [filters, setFilters] = useState({ status: [], reviewState: drill.vendor || drill.account ? 'all' : 'open', accountType: ['Expense'], entityId: '' });
+  const [text, setText] = useState({ account: drill.account, vendor: drill.vendor, search: '' });
   const debouncedText = useDebounced(JSON.stringify(text), DEBOUNCE_MS);
   const [selected, setSelected] = useState(new Set());
   const [allMatching, setAllMatching] = useState(false);
@@ -501,7 +527,9 @@ export default function ReviewQueue() {
         setOverview(ov);
         // Start on the management (class-based) file when there is one.
         const classFiles = ov.qbos.filter((q) => q.isClassBased);
-        if (classFiles.length === 1) setQboId(classFiles[0].qboId);
+        const wanted = ov.qbos.find((q) => q.qboId === searchParams.get('qboId'));
+        if (wanted) setQboId(wanted.qboId);
+        else if (classFiles.length === 1) setQboId(classFiles[0].qboId);
         else if (ov.qbos.length === 1) setQboId(ov.qbos[0].qboId);
       })
       .catch(setError);
@@ -712,6 +740,15 @@ export default function ReviewQueue() {
 
       {data && (
         <>
+          {kind === 'Class' && data.summary.Conflict?.open > 0 && (
+            <Alert severity="warning" sx={{ mb: 2 }}>
+              {data.summary.Conflict.open} conflict{data.summary.Conflict.open === 1 ? '' : 's'} between a vendor rule and history.{' '}
+              <Link component={RouterLink} to={`/controller/conflicts?qboId=${qboId}&month=${month}`}>
+                Resolve in Conflicts
+              </Link>{' '}
+              to see the rule and history side by side.
+            </Alert>
+          )}
           <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap', mb: 2 }}>
             {Object.entries(STATUS_INFO).filter(([status]) => !(kind === 'Account' && status === 'Unclassified')).map(([status, info]) => {
               const s = data.summary[status];

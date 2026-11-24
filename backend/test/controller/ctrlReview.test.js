@@ -41,7 +41,14 @@ describe('helpers', () => {
   });
 
   test('validateSettings', () => {
-    expect(validateSettings({ threshold: 0.9, mediumThreshold: 0.7, historyMonths: 12 })).toEqual({ threshold: 0.9, mediumThreshold: 0.7, historyMonths: 12 });
+    expect(validateSettings({ threshold: 0.9, mediumThreshold: 0.7, historyMonths: 12 })).toEqual({
+      threshold: 0.9, mediumThreshold: 0.7, historyMonths: 12, splitShiftPoints: 25, spikePercent: 50, spikeMinAmount: 500, recurringMonths: 3, baselineMonths: 6,
+    });
+    const base = { threshold: 0.9, mediumThreshold: 0.7, historyMonths: 12 };
+    expect(validateSettings({ ...base, splitShiftPoints: 30, spikeMinAmount: 0 })).toMatchObject({ splitShiftPoints: 30, spikeMinAmount: 0 });
+    expect(() => validateSettings({ ...base, splitShiftPoints: 0 })).toThrow(/splitShiftPoints/);
+    expect(() => validateSettings({ ...base, recurringMonths: 1 })).toThrow(/recurringMonths/);
+    expect(() => validateSettings({ ...base, spikeMinAmount: -5 })).toThrow(/spikeMinAmount/);
     expect(() => validateSettings({ threshold: 0.4, mediumThreshold: 0.2, historyMonths: 12 })).toThrow(/threshold/);
     expect(() => validateSettings({ threshold: 0.9, mediumThreshold: 0.95, historyMonths: 12 })).toThrow(/mediumThreshold/);
     expect(() => validateSettings({ threshold: 0.9, mediumThreshold: 0.7, historyMonths: 40 })).toThrow(/historyMonths/);
@@ -424,7 +431,9 @@ describe('account review: Reclassify and Due To/From', () => {
 describe('settings', () => {
   test('defaults to 90% / 70% / 12 months', async () => {
     setup();
-    expect(parseBody(await get('/api/controller/review/settings'))).toEqual({ threshold: 0.9, mediumThreshold: 0.7, historyMonths: 12 });
+    expect(parseBody(await get('/api/controller/review/settings'))).toEqual({
+      threshold: 0.9, mediumThreshold: 0.7, historyMonths: 12, splitShiftPoints: 25, spikePercent: 50, spikeMinAmount: 500, recurringMonths: 3, baselineMonths: 6,
+    });
   });
 
   test('saves new settings', async () => {
@@ -434,7 +443,7 @@ describe('settings', () => {
     );
     expect(res.statusCode).toBe(200);
     const upsert = query.mock.calls.find(([sql]) => /INSERT INTO CtrlReviewSettings/.test(sql));
-    expect(upsert[1]).toEqual(['group-1', 0.85, 0.6, 24, 'user-paul']);
+    expect(upsert[1]).toEqual(['group-1', 0.85, 0.6, 24, 'user-paul', 25, 50, 500, 3, 6]);
   });
 });
 

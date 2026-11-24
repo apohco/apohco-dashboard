@@ -90,6 +90,100 @@ describe('PUT /api/controller/vendors/{vendorId}', () => {
   });
 });
 
+describe('Phase 2b: stats, profile and rule test', () => {
+  const stored = (over) => ({
+    lineid: over.lineid, qboid: 'qbo-mgmt', month: '2026-09', fingerprint: over.lineid, txndate: '2026-09-02', payeename: 'Kroger', payeekey: 'kroger',
+    memo: '', accountcode: '6100', accountname: 'Supplies', classname: 'Milford', qboclassid: 'cls-mil', amount: '50', accounttype: 'Expense', action: null, ...over,
+  });
+  const LINES = [
+    stored({ lineid: 'a' }),
+    stored({ lineid: 'b', month: '2026-10', action: 'Reassign', decisionentityid: 'ent-leb' }),
+    stored({ lineid: 'c', month: '2026-10', action: 'Approve', decisionentityid: 'ent-mil' }),
+    stored({ lineid: 'd', month: '2026-10', accounttype: 'Asset', accountname: 'Checking', amount: '-150' }),
+    stored({ lineid: 'e', accounttype: 'Asset', accountname: 'Checking', action: 'Reassign', decisionentityid: 'ent-leb', scope: 'Relabel' }),
+  ];
+  function profileSetup() {
+    setup();
+    query.mockImplementation(
+      sqlRouter([
+        [/FROM CtrlEntities e/, { rows: [
+          { entityid: 'ent-leb', entityname: 'Lebanon', managementqboclassid: 'cls-leb', managementclassname: 'Lebanon', aliases: [], keywords: [] },
+          { entityid: 'ent-mil', entityname: 'Milford', managementqboclassid: 'cls-mil', managementclassname: 'Milford', aliases: [], keywords: [] },
+        ] }],
+        [/FROM CtrlEntities/, { rows: [{ entityid: 'ent-leb', entityname: 'Lebanon' }, { entityid: 'ent-mil', entityname: 'Milford' }] }],
+        [/FROM CtrlVendors WHERE VendorId/, { rows: [{ vendorid: V1, displayname: 'Kroger', watchmode: false, splittemplate: null, mergedintovendorid: null }] }],
+        [/SELECT PayeeKey, PayeeName FROM CtrlVendorAliases/, { rows: [{ payeekey: 'kroger', payeename: 'Kroger' }] }],
+        [/FROM QBOs WHERE GroupId/, { rows: [{ qboid: 'qbo-mgmt', qboname: 'APOHCO', isclassbased: true }] }],
+        [/FROM CtrlVendorRules r LEFT JOIN Users/, { rows: [
+          { ruleid: 'r2', version: 2, defaultentityid: 'ent-leb', hints: { keywords: [] }, ruletext: 'v2', rulewins: true, createddate: 'd2', createdby: 'paul' },
+          { ruleid: 'r1', version: 1, defaultentityid: 'ent-mil', hints: { keywords: [] }, ruletext: 'v1', rulewins: false, createddate: 'd1', createdby: 'paul' },
+        ] }],
+        [/SELECT DISTINCT QBOId, TO_CHAR\(Period/, { rows: [{ qboid: 'qbo-mgmt', month: '2026-09' }, { qboid: 'qbo-mgmt', month: '2026-10' }] }],
+        [/WITH snaps AS/, { rows: LINES }],
+        [/d.Scope = 'Relabel'/, { rows: [{ runid: 'run-1', entityid: 'ent-leb', requestaje: false, decidedat: 'now', decidedby: 'paul', linecount: 37, amount: '4210.5', frommonth: '2026-01', tomonth: '2026-09' }] }],
+        [/FROM CtrlDecisions d/, { rows: [{ decisionid: 'd1', action: 'Reassign', entityid: 'ent-leb', scope: 'Line', decidedat: 'now', decidedby: 'paul', qboname: 'APOHCO', txndate: '2026-10-02', memo: '', amount: '50', classname: 'Milford', accountcode: '6100', accountname: 'Supplies' }] }],
+        [/FROM CtrlReviewSettings/, { rows: [] }],
+      ])
+    );
+  }
+
+  test('the list carries 12-month spend and review stats', async () => {
+    setup();
+    query.mockImplementation(
+      sqlRouter([
+        [/FROM CtrlEntities/, { rows: [] }],
+        [/COUNT\(\*\)::int AS LineCount/, { rows: [{ vendorid: V1, linecount: 12, spend: '345.678' }] }],
+        [/AS Reviewed/, { rows: [{ vendorid: V1, reviewed: 10, decided: 4, avgconfidence: '0.8123' }] }],
+        [/FROM CtrlVendors v/, { rows: [{ vendorid: V1, displayname: 'Kroger', aliases: [], ruleid: null }, { vendorid: V2, displayname: 'Other', aliases: [], ruleid: null }] }],
+      ])
+    );
+    const data = parseBody(await handler(apiEvent({ method: 'GET', resource: '/api/controller/vendors', query: { groupId: 'group-1' } })));
+    expect(data.vendors[0].stats).toEqual({ spend12: 345.68, lineCount12: 12, reviewed: 10, decided: 4, reviewedPct: 0.4, avgConfidence: 0.812 });
+    expect(data.vendors[1].stats).toMatchObject({ spend12: 0, reviewedPct: null });
+  });
+
+  test('profile: rule versions, expense split by month after decisions, approval rate, corrections', async () => {
+    profileSetup();
+    const res = await handler(apiEvent({ method: 'GET', resource: '/api/controller/vendors/{vendorId}', path: { vendorId: V1 }, query: { groupId: 'group-1' } }));
+    const data = parseBody(res);
+    expect(res.statusCode).toBe(200);
+    expect(data.ruleVersions.map((r) => [r.version, r.ruleWins])).toEqual([[2, true], [1, false]]);
+    // The Asset (bank) side is not spend.
+    expect(data.entitySplit).toEqual([
+      { month: '2026-09', entityId: 'ent-mil', amount: 50 },
+      { month: '2026-10', entityId: 'ent-leb', amount: 50 },
+      { month: '2026-10', entityId: 'ent-mil', amount: 50 },
+    ]);
+    // The relabeled line is counted on its own, not as a correction.
+    expect(data.outcome).toEqual({ approved: 1, corrected: 1, relabeled: 1, open: 2, approvalRate: 0.5 });
+    expect(data.relabels).toEqual([{ runId: 'run-1', entityId: 'ent-leb', requestAje: false, decidedAt: 'now', decidedBy: 'paul', lineCount: 37, amount: 4210.5, fromMonth: '2026-01', toMonth: '2026-09' }]);
+    const corrections = query.mock.calls.find(([sql]) => /LIMIT 100/.test(sql))[0];
+    expect(corrections).toMatch(/d.Scope = 'Line'/);
+    expect(data.corrections[0]).toMatchObject({ action: 'Reassign', actionText: 'Set entity', decidedBy: 'paul', amount: 50 });
+  });
+
+  test('rule test previews the last N months of class-based files without saving', async () => {
+    profileSetup();
+    const res = await handler(apiEvent({
+      method: 'POST', resource: '/api/controller/vendors/{vendorId}/rules/test', path: { vendorId: V1 },
+      body: { groupId: 'group-1', months: 3, rule: { defaultEntityId: 'ent-leb', keywords: [] } },
+    }));
+    const data = parseBody(res);
+    expect(res.statusCode).toBe(200);
+    expect(data).toMatchObject({ months: 3, fromMonth: '2026-08', toMonth: '2026-10', lineCount: 5, wouldChange: 3, unchanged: 2 });
+    const lines = query.mock.calls.find(([sql]) => /WITH snaps AS/.test(sql))[1];
+    expect(lines.slice(0, 3)).toEqual(['group-1', '2026-08-01', '2026-10-01']);
+    expect(withTransaction).not.toHaveBeenCalled();
+  });
+
+  test('rule test validation', async () => {
+    profileSetup();
+    const send = (body) => handler(apiEvent({ method: 'POST', resource: '/api/controller/vendors/{vendorId}/rules/test', path: { vendorId: V1 }, body: { groupId: 'group-1', ...body } }));
+    expect((await send({ months: 2 })).statusCode).toBe(400);
+    expect((await send({ rule: { defaultEntityId: 'nope' } })).statusCode).toBe(400);
+  });
+});
+
 describe('merge', () => {
   const merge = (vendorId, fromVendorId) =>
     handler(apiEvent({ method: 'POST', resource: '/api/controller/vendors/{vendorId}/merge', path: { vendorId }, body: { groupId: 'group-1', fromVendorId } }));

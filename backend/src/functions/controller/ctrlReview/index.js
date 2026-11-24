@@ -16,11 +16,30 @@ const {
   countStatuses,
   buildAccountHistory,
   classifyAccountLines,
-  detectDueToFromAccounts,
 } = require('../../../shared/reviewEngine');
 const { accountKey } = require('../../../shared/accountKey');
+const {
+  badRequest,
+  isUuid,
+  shiftMonth,
+  loadSettings,
+  validateSettings,
+  loadEntities,
+  loadRun,
+  loadRules,
+  loadHistoryRows,
+  loadAccountTypes,
+  loadFileAccounts,
+  resolveAccount,
+  loadOwnerEntityId,
+  loadEffectiveDueToFrom,
+  ACCOUNT_TYPE_SQL,
+  accountTypeJoin,
+} = require('../../../shared/ctrlReviewData');
 
-const DEFAULT_SETTINGS = { threshold: 0.9, mediumThreshold: 0.7, historyMonths: 12 };
+const csv = (v) => (v ? String(v).split(',').map((s) => s.trim()).filter(Boolean) : []);
+const likePattern = (s) => `%${String(s).replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+
 const DEFAULT_LIMIT = 100;
 const MAX_LIMIT = 500;
 const MAX_DECISIONS_PER_REQUEST = 10000;
@@ -29,83 +48,9 @@ const BULK_ACTIONS = ['Approve', 'Keep', 'Reassign', 'Reclassify', 'DueToFrom'];
 // Entity assignment only makes sense where lines carry classes.
 const CLASS_ONLY_ACTIONS = ['Reassign', 'Split'];
 const LINE_ACTIONS = [...BULK_ACTIONS, 'Split', 'Undo'];
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 // Review order: what most needs attention first.
 const STATUS_ORDER = `CASE s.Status WHEN 'Conflict' THEN 0 WHEN 'LikelyMisclassified' THEN 1 WHEN 'Unclassified' THEN 2
   WHEN 'NeedsEvidence' THEN 3 ELSE 4 END`;
-
-function badRequest(message, statusCode = 400) {
-  const err = new Error(message);
-  err.statusCode = statusCode;
-  return err;
-}
-
-const isUuid = (v) => UUID_RE.test(String(v || ''));
-const csv = (v) => (v ? String(v).split(',').map((s) => s.trim()).filter(Boolean) : []);
-const likePattern = (s) => `%${String(s).replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
-
-// "YYYY-MM" shifted by `delta` months.
-function shiftMonth(month, delta) {
-  const { year, month: m } = parseMonth(month);
-  const i = year * 12 + (m - 1) + delta;
-  return `${Math.floor(i / 12)}-${String((i % 12) + 1).padStart(2, '0')}`;
-}
-
-async function loadSettings(groupId, db = { query }) {
-  const { rows } = await db.query(
-    `SELECT Threshold, MediumThreshold, HistoryMonths FROM CtrlReviewSettings WHERE GroupId = $1`,
-    [groupId]
-  );
-  if (!rows.length) return { ...DEFAULT_SETTINGS };
-  return {
-    threshold: Number(rows[0].threshold),
-    mediumThreshold: Number(rows[0].mediumthreshold),
-    historyMonths: Number(rows[0].historymonths),
-  };
-}
-
-function validateSettings(body) {
-  const threshold = Number(body.threshold);
-  const mediumThreshold = Number(body.mediumThreshold);
-  const historyMonths = Number(body.historyMonths);
-  if (!(threshold >= 0.5 && threshold <= 1)) throw badRequest('threshold must be between 0.5 and 1');
-  if (!(mediumThreshold >= 0 && mediumThreshold <= threshold)) {
-    throw badRequest('mediumThreshold must be between 0 and threshold');
-  }
-  if (!Number.isInteger(historyMonths) || historyMonths < 1 || historyMonths > 36) {
-    throw badRequest('historyMonths must be a whole number from 1 to 36');
-  }
-  return { threshold, mediumThreshold, historyMonths };
-}
-
-async function loadEntities(groupId) {
-  const { rows } = await query(
-    `SELECT e.EntityId, e.EntityName, e.ManagementQBOClassId, c.ClassName AS ManagementClassName, e.Aliases, e.Keywords
-     FROM CtrlEntities e LEFT JOIN QBOClasses c ON c.QBOClassId = e.ManagementQBOClassId
-     WHERE e.GroupId = $1 AND e.IsActive
-     ORDER BY e.EntityName`,
-    [groupId]
-  );
-  return rows.map((r) => ({
-    entityId: r.entityid,
-    entityName: r.entityname,
-    managementQboClassId: r.managementqboclassid,
-    managementClassName: r.managementclassname,
-    aliases: r.aliases || [],
-    keywords: r.keywords || [],
-  }));
-}
-
-async function loadRun(groupId, runId) {
-  if (!isUuid(runId)) throw badRequest('Review run not found', 404);
-  const { rows } = await query(
-    `SELECT RunId, QBOId, TO_CHAR(Period, 'YYYY-MM') AS month, SnapshotId, Threshold, MediumThreshold, ReviewKind
-     FROM CtrlReviewRuns WHERE RunId = $1 AND GroupId = $2`,
-    [runId, groupId]
-  );
-  if (!rows.length) throw badRequest('Review run not found', 404);
-  return rows[0];
-}
 
 // Payee key -> vendor id for every payee on `lines`, creating a vendor
 // profile (and alias) for any payee seen for the first time.
@@ -139,126 +84,6 @@ async function ensureVendors(client, groupId, payeeNames) {
     for (const [key, name] of batch) vendorByKey.set(key, byName.get(name));
   }
   return vendorByKey;
-}
-
-async function loadRules(client, groupId) {
-  const { rows } = await client.query(
-    `SELECT DISTINCT ON (VendorId) RuleId, VendorId, Version, DefaultEntityId, Hints
-     FROM CtrlVendorRules WHERE GroupId = $1 ORDER BY VendorId, Version DESC`,
-    [groupId]
-  );
-  return new Map(
-    rows.map((r) => [r.vendorid, { ruleId: r.ruleid, version: r.version, defaultEntityId: r.defaultentityid, hints: r.hints || {} }])
-  );
-}
-
-// Weighted class history for this file over the months before `month`:
-// the latest snapshot of each month, with Paul's latest decision on each
-// line replacing the line's QuickBooks class.
-async function loadHistoryRows(client, groupId, qboId, month, historyMonths) {
-  const { rows } = await client.query(
-    `WITH snaps AS (
-       SELECT DISTINCT ON (Period) SnapshotId FROM CtrlSnapshots
-       WHERE GroupId = $1 AND QBOId = $2 AND Period >= $3 AND Period < $4
-       ORDER BY Period, PulledAt DESC
-     ),
-     dec AS (
-       SELECT DISTINCT ON (Fingerprint) Fingerprint, Action, EntityId, Allocations
-       FROM CtrlDecisions WHERE GroupId = $1 AND QBOId = $2
-       ORDER BY Fingerprint, DecidedAt DESC
-     )
-     SELECT l.PayeeName, l.AccountCode, l.ClassName, l.QBOClassId,
-            d.Action, d.EntityId AS DecisionEntityId, d.Allocations, COUNT(*)::int AS n
-     FROM CtrlLedgerLines l
-     JOIN snaps s ON s.SnapshotId = l.SnapshotId
-     LEFT JOIN dec d ON d.Fingerprint = l.Fingerprint
-     GROUP BY l.PayeeName, l.AccountCode, l.ClassName, l.QBOClassId, d.Action, d.EntityId, d.Allocations`,
-    [groupId, qboId, `${shiftMonth(month, -historyMonths)}-01`, `${month}-01`]
-  );
-  return rows;
-}
-
-// ---- Accounts of one QBO file (account review, Reclassify, Due To/From)
-
-// accountKey -> account type: the dashboard's Chart of Accounts, else the
-// type confirmed when a GL was uploaded for the file (latest upload wins).
-async function loadAccountTypes(groupId, qboId, db = { query }) {
-  const types = new Map();
-  const { rows: uploads } = await db.query(
-    `SELECT AccountClassifications FROM CtrlUploads
-     WHERE GroupId = $1 AND QBOId = $2 AND Status = 'Imported' AND AccountClassifications IS NOT NULL
-     ORDER BY ImportedDate`,
-    [groupId, qboId]
-  );
-  for (const u of uploads) for (const [key, type] of Object.entries(u.accountclassifications || {})) types.set(key, type);
-  const { rows: coa } = await db.query(
-    `SELECT AccountCode, AccountName, Classification FROM ChartOfAccountsMappings
-     WHERE GroupId = $1 AND QBOId = $2 AND Classification IS NOT NULL`,
-    [groupId, qboId]
-  );
-  for (const m of coa) types.set(accountKey(m.accountcode || null, m.accountname), m.classification);
-  return types;
-}
-
-// Every account seen in the file (Chart of Accounts + stored GL lines):
-// [{ key, code, name, type }], by code then name.
-async function loadFileAccounts(groupId, qboId) {
-  const [{ rows: coa }, { rows: seen }, types] = await Promise.all([
-    query(`SELECT AccountCode, AccountName FROM ChartOfAccountsMappings WHERE GroupId = $1 AND QBOId = $2`, [groupId, qboId]),
-    query(
-      `SELECT DISTINCT AccountCode, AccountName FROM CtrlLedgerLines
-       WHERE GroupId = $1 AND QBOId = $2 AND COALESCE(AccountName, '') <> ''`,
-      [groupId, qboId]
-    ),
-    loadAccountTypes(groupId, qboId),
-  ]);
-  const byKey = new Map();
-  for (const a of [...coa, ...seen]) {
-    if (!a.accountname) continue;
-    const key = accountKey(a.accountcode || null, a.accountname);
-    if (!byKey.has(key)) byKey.set(key, { key, code: a.accountcode || null, name: a.accountname, type: types.get(key) || 'Unknown' });
-  }
-  return [...byKey.values()].sort((a, b) => (a.code || '~').localeCompare(b.code || '~') || a.name.localeCompare(b.name));
-}
-
-// The account a request names ({ code?, name }), as the file knows it.
-async function resolveAccount(groupId, qboId, account) {
-  if (!account || typeof account.name !== 'string' || !account.name.trim()) throw badRequest('account (with a name) is required');
-  const key = accountKey(account.code ? String(account.code).trim() : null, account.name.trim());
-  const found = (await loadFileAccounts(groupId, qboId)).find((a) => a.key === key);
-  if (!found) throw badRequest(`"${account.name}" is not an account in this QBO file`);
-  return found;
-}
-
-// The entity whose own (practice) file this is, when exactly one is.
-async function loadOwnerEntityId(groupId, qboId) {
-  const { rows } = await query(
-    `SELECT EntityId FROM CtrlEntities WHERE GroupId = $1 AND PracticeQBOId = $2 AND IsActive`,
-    [groupId, qboId]
-  );
-  return rows.length === 1 ? rows[0].entityid : null;
-}
-
-// counterpartyEntityId -> { accountKey, code, name } for one file.
-async function loadDueToFrom(groupId, qboId, db = { query }) {
-  const { rows } = await db.query(
-    `SELECT CounterpartyEntityId, AccountCode, AccountName FROM CtrlDueToFromAccounts WHERE GroupId = $1 AND QBOId = $2`,
-    [groupId, qboId]
-  );
-  return new Map(
-    rows.map((r) => [
-      r.counterpartyentityid,
-      { accountKey: accountKey(r.accountcode || null, r.accountname), code: r.accountcode || null, name: r.accountname },
-    ])
-  );
-}
-
-// The Due To/From account per other entity: the saved one, else the one
-// whose name says "Due from/to <entity>". { saved, detected, effective }.
-async function loadEffectiveDueToFrom(groupId, qboId, entities, ownerEntityId, db = { query }) {
-  const [saved, accounts] = await Promise.all([loadDueToFrom(groupId, qboId, db), loadFileAccounts(groupId, qboId)]);
-  const detected = detectDueToFromAccounts(entities, ownerEntityId, accounts);
-  return { saved, detected, effective: new Map([...detected, ...saved]) };
 }
 
 async function saveDueToFrom(db, groupId, qboId, counterpartyEntityId, account, userId) {
@@ -527,24 +352,13 @@ function buildFilterSql(f, start) {
   return { sql: clauses.map((c) => ` AND ${c}`).join(''), params };
 }
 
-// A line's account type: the dashboard's Chart of Accounts, else the type
-// Paul confirmed when uploading a GL for this file (CtrlUploads keeps
-// those per account, keyed like glUploadParser.accountKey).
-const ACCOUNT_TYPE_SQL = `COALESCE(m.Classification, ua.Classification, 'Unknown')`;
 
 // The queue's FROM clause. Parameters: $1 groupId, $2 runId, $3 qboId.
 const QUEUE_FROM = `
   FROM CtrlSuggestions s
   JOIN CtrlLedgerLines l ON l.LineId = s.LineId
   LEFT JOIN CtrlVendors v ON v.VendorId = s.VendorId
-  LEFT JOIN ChartOfAccountsMappings m ON m.QBOId = l.QBOId AND m.AccountCode = l.AccountCode
-  LEFT JOIN LATERAL (
-    SELECT u.AccountClassifications ->> k.Key AS Classification
-    FROM (SELECT CASE WHEN COALESCE(l.AccountCode, '') <> '' THEN 'code:' || l.AccountCode
-                      ELSE 'name:' || lower(COALESCE(l.AccountName, '')) END AS Key) k
-    JOIN CtrlUploads u ON u.QBOId = l.QBOId AND u.Status = 'Imported' AND u.AccountClassifications ? k.Key
-    ORDER BY u.ImportedDate DESC LIMIT 1
-  ) ua ON m.Classification IS NULL
+  ${accountTypeJoin('l')}
   LEFT JOIN (
     SELECT DISTINCT ON (Fingerprint) Fingerprint, Action, EntityId, Allocations, DecidedAt,
            TargetAccountCode, TargetAccountName, CounterpartyEntityId
@@ -920,11 +734,18 @@ exports.handler = withErrorHandling(async (event) => {
   if (httpMethod === 'PUT' && resource.endsWith('/settings')) {
     const settings = validateSettings(body);
     await query(
-      `INSERT INTO CtrlReviewSettings (GroupId, Threshold, MediumThreshold, HistoryMonths, UpdatedBy)
-       VALUES ($1, $2, $3, $4, $5)
+      `INSERT INTO CtrlReviewSettings (GroupId, Threshold, MediumThreshold, HistoryMonths, UpdatedBy,
+         SplitShiftPoints, SpikePercent, SpikeMinAmount, RecurringMonths, BaselineMonths)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
        ON CONFLICT (GroupId) DO UPDATE SET Threshold = EXCLUDED.Threshold, MediumThreshold = EXCLUDED.MediumThreshold,
-         HistoryMonths = EXCLUDED.HistoryMonths, UpdatedBy = EXCLUDED.UpdatedBy, LastUpdated = now()`,
-      [body.groupId, settings.threshold, settings.mediumThreshold, settings.historyMonths, claims.userId]
+         HistoryMonths = EXCLUDED.HistoryMonths, UpdatedBy = EXCLUDED.UpdatedBy, LastUpdated = now(),
+         SplitShiftPoints = EXCLUDED.SplitShiftPoints, SpikePercent = EXCLUDED.SpikePercent,
+         SpikeMinAmount = EXCLUDED.SpikeMinAmount, RecurringMonths = EXCLUDED.RecurringMonths,
+         BaselineMonths = EXCLUDED.BaselineMonths`,
+      [
+        body.groupId, settings.threshold, settings.mediumThreshold, settings.historyMonths, claims.userId,
+        settings.splitShiftPoints, settings.spikePercent, settings.spikeMinAmount, settings.recurringMonths, settings.baselineMonths,
+      ]
     );
     await recordAudit({ groupId: body.groupId, userId: claims.userId, action: 'ctrl.review.settings', details: settings });
     return json(200, settings);

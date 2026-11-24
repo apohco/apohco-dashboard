@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Link as RouterLink } from 'react-router-dom';
 import {
   Alert,
   Box,
@@ -11,6 +12,7 @@ import {
   DialogTitle,
   Divider,
   FormControlLabel,
+  Link,
   MenuItem,
   Paper,
   Select,
@@ -21,12 +23,14 @@ import {
   TableContainer,
   TableHead,
   TableRow,
+  TableSortLabel,
   TextField,
   Typography,
 } from '@mui/material';
 import useControllerGroup from '../../hooks/useControllerGroup';
 import ControllerGroupSelect from '../../components/controller/ControllerGroupSelect';
-import { listVendors, mergeVendor, updateVendor } from '../../api/controller';
+import { listVendors, mergeVendor, testVendorRule, updateVendor } from '../../api/controller';
+import { formatCurrency } from '../../utils/format';
 
 const errorText = (err) => err?.response?.data?.message || err?.message;
 
@@ -57,6 +61,22 @@ export function toBody(form) {
   };
 }
 
+// Sort by name, 12-month spend, % reviewed or average confidence; vendors
+// without a value sort last either way.
+export function sortVendors(vendors, { key, dir }) {
+  const value = (v) =>
+    key === 'name' ? v.displayName.toLowerCase() : key === 'spend' ? v.stats?.spend12 : key === 'reviewed' ? v.stats?.reviewedPct : v.stats?.avgConfidence;
+  const sign = dir === 'asc' ? 1 : -1;
+  return [...vendors].sort((a, b) => {
+    const x = value(a);
+    const y = value(b);
+    if (x === y) return a.displayName.localeCompare(b.displayName);
+    if (x === null || x === undefined) return 1;
+    if (y === null || y === undefined) return -1;
+    return (x < y ? -1 : 1) * sign;
+  });
+}
+
 function EntitySelect({ value, onChange, entities, label, allowNone }) {
   return (
     <Select size="small" displayEmpty value={value} onChange={(e) => onChange(e.target.value)} sx={{ minWidth: 180 }} inputProps={{ 'aria-label': label }}>
@@ -69,6 +89,88 @@ function EntitySelect({ value, onChange, entities, label, allowNone }) {
         </MenuItem>
       ))}
     </Select>
+  );
+}
+
+// "Test a rule": how the rule being edited would treat the vendor's lines in
+// the class-based files over the last N months. Nothing is saved.
+export function RuleTest({ groupId, vendorId, rule, entities }) {
+  const [months, setMonths] = useState(12);
+  const [result, setResult] = useState(null);
+  const [error, setError] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const name = (id) => (id ? entities.find((e) => e.entityId === id)?.entityName || 'Former entity' : 'Unassigned');
+  const run = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      setResult(await testVendorRule(groupId, vendorId, rule, months));
+    } catch (err) {
+      setError(err);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Box sx={{ mt: 2, p: 1.5, bgcolor: 'background.default', borderRadius: 1 }}>
+      <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
+        <Typography variant="body2" sx={{ flex: 1 }}>
+          Test this rule against past lines before saving.
+        </Typography>
+        <Select size="small" value={months} onChange={(e) => setMonths(e.target.value)} inputProps={{ 'aria-label': 'Months to test' }}>
+          {[3, 6, 12].map((m) => (
+            <MenuItem key={m} value={m}>
+              Last {m} months
+            </MenuItem>
+          ))}
+        </Select>
+        <Button size="small" variant="outlined" disabled={busy} onClick={run}>
+          Test rule
+        </Button>
+      </Box>
+      {error && <Alert severity="error" sx={{ mt: 1 }}>{errorText(error)}</Alert>}
+      {result && (
+        <Box sx={{ mt: 1 }} data-testid="rule-test">
+          <Typography variant="body2">
+            {result.lineCount
+              ? `${result.lineCount} lines (${result.fromMonth} to ${result.toMonth}): ${result.wouldChange} would change entity (${formatCurrency(result.changeAmount)}), ${result.unchanged} stay the same, ${result.noEntity} not covered by the rule.`
+              : 'No lines for this vendor in the class-based files in that period.'}
+          </Typography>
+          {result.conflictsWithHistory > 0 && (
+            <Alert severity="warning" sx={{ mt: 1 }}>
+              {result.conflictsWithHistory} change{result.conflictsWithHistory === 1 ? '' : 's'} would conflict with history ({name(result.history.entityId)},{' '}
+              {Math.round(result.history.confidence * 100)}%).
+            </Alert>
+          )}
+          {result.changes.length > 0 && (
+            <Table size="small" sx={{ mt: 1 }}>
+              <TableHead>
+                <TableRow>
+                  <TableCell>Date</TableCell>
+                  <TableCell>Memo</TableCell>
+                  <TableCell align="right">Amount</TableCell>
+                  <TableCell>From</TableCell>
+                  <TableCell>To</TableCell>
+                  <TableCell>Why</TableCell>
+                </TableRow>
+              </TableHead>
+              <TableBody>
+                {result.changes.slice(0, 10).map((c) => (
+                  <TableRow key={c.lineId}>
+                    <TableCell sx={{ whiteSpace: 'nowrap' }}>{c.txnDate}</TableCell>
+                    <TableCell>{c.memo}</TableCell>
+                    <TableCell align="right">{formatCurrency(c.amount)}</TableCell>
+                    <TableCell>{name(c.fromEntityId)}</TableCell>
+                    <TableCell>{name(c.toEntityId)}</TableCell>
+                    <TableCell>{c.via}</TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          )}
+        </Box>
+      )}
+    </Box>
   );
 }
 
@@ -155,6 +257,12 @@ function VendorDialog({ vendor, vendors, entities, groupId, onClose }) {
             Current rule: version {vendor.rule.version}, saved {new Date(vendor.rule.createdDate).toLocaleDateString()}. Saving a change adds a new version.
           </Typography>
         )}
+        <RuleTest
+          groupId={groupId}
+          vendorId={vendor.vendorId}
+          rule={{ defaultEntityId: toBody(form).rule.defaultEntityId, keywords: toBody(form).rule.keywords }}
+          entities={entities}
+        />
 
         <Divider sx={{ my: 2 }} />
         <Typography variant="subtitle2">Default split</Typography>
@@ -233,13 +341,25 @@ export default function Vendors() {
     load();
   }, [load]);
 
+  const [sort, setSort] = useState({ key: 'spend', dir: 'desc' });
   const entityName = (id) => data?.entities.find((e) => e.entityId === id)?.entityName || '—';
   const visible = useMemo(() => {
     const q = search.trim().toLowerCase();
     if (!data) return [];
-    if (!q) return data.vendors;
-    return data.vendors.filter((v) => v.displayName.toLowerCase().includes(q) || v.aliases.some((a) => a.toLowerCase().includes(q)));
-  }, [data, search]);
+    const list = q ? data.vendors.filter((v) => v.displayName.toLowerCase().includes(q) || v.aliases.some((a) => a.toLowerCase().includes(q))) : data.vendors;
+    return sortVendors(list, sort);
+  }, [data, search, sort]);
+  const sortHeader = (key, label, align) => (
+    <TableCell align={align} sortDirection={sort.key === key ? sort.dir : false}>
+      <TableSortLabel
+        active={sort.key === key}
+        direction={sort.key === key ? sort.dir : 'desc'}
+        onClick={() => setSort((s) => ({ key, dir: s.key === key && s.dir === 'desc' ? 'asc' : 'desc' }))}
+      >
+        {label}
+      </TableSortLabel>
+    </TableCell>
+  );
 
   return (
     <Box>
@@ -261,11 +381,13 @@ export default function Vendors() {
             <Table size="small">
               <TableHead>
                 <TableRow>
-                  <TableCell>Vendor</TableCell>
+                  {sortHeader('name', 'Vendor')}
                   <TableCell>Payee names</TableCell>
                   <TableCell>Default entity</TableCell>
-                  <TableCell>Keywords</TableCell>
                   <TableCell>Rule</TableCell>
+                  {sortHeader('spend', '12-month spend', 'right')}
+                  {sortHeader('reviewed', 'Reviewed', 'right')}
+                  {sortHeader('confidence', 'Avg confidence', 'right')}
                   <TableCell />
                 </TableRow>
               </TableHead>
@@ -273,14 +395,21 @@ export default function Vendors() {
                 {visible.map((v) => (
                   <TableRow key={v.vendorId} hover>
                     <TableCell>
-                      {v.displayName}
+                      <Link component={RouterLink} to={`/controller/vendors/${v.vendorId}`}>
+                        {v.displayName}
+                      </Link>
                       {v.watchMode && <Chip size="small" label="Watch" sx={{ ml: 1 }} />}
                       {v.splitTemplate && <Chip size="small" variant="outlined" label="Split" sx={{ ml: 1 }} />}
                     </TableCell>
                     <TableCell sx={{ maxWidth: 260 }}>{v.aliases.join(', ')}</TableCell>
                     <TableCell>{v.rule?.defaultEntityId ? entityName(v.rule.defaultEntityId) : '—'}</TableCell>
-                    <TableCell>{v.rule?.keywords.length || 0}</TableCell>
-                    <TableCell>{v.rule ? `v${v.rule.version}` : '—'}</TableCell>
+                    <TableCell>
+                      {v.rule ? `v${v.rule.version}` : '—'}
+                      {v.rule?.keywords.length ? ` · ${v.rule.keywords.length} keyword${v.rule.keywords.length === 1 ? '' : 's'}` : ''}
+                    </TableCell>
+                    <TableCell align="right">{v.stats ? formatCurrency(v.stats.spend12) : '—'}</TableCell>
+                    <TableCell align="right">{v.stats?.reviewedPct === null || !v.stats ? '—' : `${Math.round(v.stats.reviewedPct * 100)}%`}</TableCell>
+                    <TableCell align="right">{v.stats?.avgConfidence === null || !v.stats ? '—' : `${Math.round(v.stats.avgConfidence * 100)}%`}</TableCell>
                     <TableCell align="right">
                       <Button size="small" onClick={() => setEditing(v)}>
                         Edit
@@ -290,7 +419,7 @@ export default function Vendors() {
                 ))}
                 {visible.length === 0 && (
                   <TableRow>
-                    <TableCell colSpan={6} sx={{ color: 'text.secondary' }}>
+                    <TableCell colSpan={8} sx={{ color: 'text.secondary' }}>
                       {data.vendors.length ? 'No vendors match.' : 'No vendors yet. Run a review to create them.'}
                     </TableCell>
                   </TableRow>

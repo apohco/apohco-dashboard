@@ -776,11 +776,60 @@ Resources:
             Path: /api/controller/review/due-to-from
             Method: put
 
+  # Phase 2b: conflicts queue (rule vs history) and its three resolutions.
+  # Database only; no QuickBooks calls.
+  CtrlConflictsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: ctrlConflicts
+      Handler: src/functions/controller/ctrlConflicts/index.handler
+      MemorySize: 512
+      Policies: *lambdaPolicies
+      Environment: *cognitoAuthEnv
+      Events:
+        List:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/controller/conflicts
+            Method: get
+        Preview:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/controller/conflicts/{lineId}/preview
+            Method: post
+        Resolve:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/controller/conflicts/{lineId}/resolve
+            Method: post
+
+  # Phase 2b: trends (spend by entity, vendor splits) and trend checks.
+  CtrlTrendsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: ctrlTrends
+      Handler: src/functions/controller/ctrlTrends/index.handler
+      MemorySize: 1024
+      Timeout: 30
+      Policies: *lambdaPolicies
+      Environment: *cognitoAuthEnv
+      Events:
+        Trends:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/controller/trends
+            Method: get
+
   ManageCtrlVendorsFunction:
     Type: AWS::Serverless::Function
     Properties:
       FunctionName: manageCtrlVendors
       Handler: src/functions/controller/manageCtrlVendors/index.handler
+      MemorySize: 512
       Policies: *lambdaPolicies
       Environment: *cognitoAuthEnv
       Events:
@@ -796,6 +845,18 @@ Resources:
             RestApiId: !Ref ApohcoDashboardApi
             Path: /api/controller/vendors/{vendorId}
             Method: put
+        Profile:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/controller/vendors/{vendorId}
+            Method: get
+        RuleTest:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/controller/vendors/{vendorId}/rules/test
+            Method: post
         Merge:
           Type: Api
           Properties:

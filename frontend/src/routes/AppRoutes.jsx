@@ -21,6 +21,9 @@ import EntitiesSetup from '../pages/Controller/EntitiesSetup';
 import GlUpload from '../pages/Controller/GlUpload';
 import ReviewQueue from '../pages/Controller/ReviewQueue';
 import Vendors from '../pages/Controller/Vendors';
+import VendorProfile from '../pages/Controller/VendorProfile';
+import Conflicts from '../pages/Controller/Conflicts';
+import Trends from '../pages/Controller/Trends';
 
 export default function AppRoutes() {
   return (
@@ -47,7 +50,10 @@ export default function AppRoutes() {
             <Route path="controller/entities" element={<EntitiesSetup />} />
             <Route path="controller/upload" element={<GlUpload />} />
             <Route path="controller/review" element={<ReviewQueue />} />
+            <Route path="controller/conflicts" element={<Conflicts />} />
             <Route path="controller/vendors" element={<Vendors />} />
+            <Route path="controller/vendors/:vendorId" element={<VendorProfile />} />
+            <Route path="controller/trends" element={<Trends />} />
           </Route>
           <Route path="*" element={<Navigate to="/financial/profit-and-loss" replace />} />
         </Route>

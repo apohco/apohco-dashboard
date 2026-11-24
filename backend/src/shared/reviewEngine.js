@@ -253,7 +253,12 @@ function classifyLines({ lines, entities, rules = new Map(), history = new Map()
     const confidence = suggestion ? suggestion.confidence : 0;
     const strong = confidence >= threshold;
     let status;
-    if (ruleHit && hist && hist.entityId !== ruleHit.entityId && hist.confidence >= threshold) {
+    const disagrees = ruleHit && hist && hist.entityId !== ruleHit.entityId && hist.confidence >= threshold;
+    if (disagrees && rule.ruleWins) {
+      // Paul chose "rule wins from now on" for this vendor.
+      reasons.push(`History says ${nameOf(hist.entityId)}, but rule v${rule.version} takes priority`);
+    }
+    if (disagrees && !rule.ruleWins) {
       status = 'Conflict';
       reasons.push(`Conflict: the rule says ${nameOf(ruleHit.entityId)}, history says ${nameOf(hist.entityId)}`);
     } else if (!line.className) {
@@ -514,6 +519,123 @@ function classifyAccountLines({
   });
 }
 
+// The whole history tally behind historySuggestion, for showing side by
+// side with a rule: { scope, total, shares: [{ entityId, weight, share }] }.
+function historyBreakdown(history, vendorId, accountCode) {
+  const h = vendorId ? history.get(vendorId) : null;
+  if (!h) return null;
+  const byAccount = h.byAccount.get(accountCode || '') || {};
+  const total = (t) => Object.values(t).reduce((s, w) => s + w, 0);
+  const useAccount = total(byAccount) >= MIN_ACCOUNT_HISTORY;
+  const tally = useAccount ? byAccount : h.overall;
+  const sum = total(tally);
+  if (!sum) return null;
+  const shares = Object.entries(tally)
+    .map(([entityId, weight]) => ({ entityId, weight: Math.round(weight * 10) / 10, share: Math.round((weight / sum) * 1000) / 1000 }))
+    .sort((a, b) => b.weight - a.weight);
+  return { scope: useAccount ? 'account' : 'vendor', total: Math.round(sum * 10) / 10, shares };
+}
+
+// "Rule wins and relabel history": the earlier lines whose entity (after
+// Paul's decisions) differs from what the rule says. Split lines are left
+// alone (Paul divided them on purpose).
+//   lines: loadStoredLines rows for the vendor, file: { isClassBased, ownerEntityId }
+// Returns { relabel: [{ line, fromEntityId, toEntityId }], skippedSplits, previouslyDecided }.
+function relabelCandidates({ lines, rule, file, resolve }) {
+  const relabel = [];
+  let skippedSplits = 0;
+  let previouslyDecided = 0;
+  for (const line of lines) {
+    const hit = ruleSuggestion(rule, line);
+    if (!hit) continue;
+    if (line.decision?.action === 'Split') {
+      skippedSplits += 1;
+      continue;
+    }
+    const [{ entityId }] = lineEntities(line, file, line.decision, resolve);
+    if (entityId === hit.entityId) continue;
+    if (line.decision && line.decision.action !== 'Undo') previouslyDecided += 1;
+    relabel.push({ line, fromEntityId: entityId, toEntityId: hit.entityId });
+  }
+  return { relabel, skippedSplits, previouslyDecided };
+}
+
+// "Test a rule": how a proposed rule would treat a vendor's stored lines.
+//   lines: loadStoredLines rows; files: Map qboId -> { isClassBased, ownerEntityId }
+//   rule: { defaultEntityId, hints: { keywords } }
+// History here is the vendor's own lines in the same window (Paul's
+// decisions weigh DECISION_WEIGHT); a change "conflicts with history" when
+// strong history (>= threshold) names a different entity than the rule.
+function testRule({ lines, rule, files, resolve, threshold = 0.9 }) {
+  const tally = {};
+  const rows = [];
+  let splits = 0;
+  for (const line of lines) {
+    const file = files.get(line.qboId) || { isClassBased: true, ownerEntityId: null };
+    if (line.decision?.action === 'Split') {
+      splits += 1;
+      continue;
+    }
+    const [{ entityId }] = lineEntities(line, file, line.decision, resolve);
+    const decided = line.decision && line.decision.action !== 'Undo';
+    addWeight(tally, entityId, decided ? DECISION_WEIGHT : 1);
+    rows.push({ line, currentEntityId: entityId, proposed: ruleSuggestion(rule, line) });
+  }
+  const hist = scoreTally(tally);
+  const strongHistory = hist && hist.confidence >= threshold ? hist : null;
+  const changes = [];
+  let unchanged = 0;
+  let noEntity = 0;
+  for (const r of rows) {
+    if (!r.proposed) noEntity += 1;
+    else if (r.proposed.entityId === r.currentEntityId) unchanged += 1;
+    else {
+      changes.push({
+        lineId: r.line.lineId,
+        month: r.line.month,
+        txnDate: r.line.txnDate,
+        memo: r.line.memo,
+        amount: r.line.amount,
+        fromEntityId: r.currentEntityId,
+        toEntityId: r.proposed.entityId,
+        via: r.proposed.kind === 'keyword' ? `keyword "${r.proposed.keyword}"` : 'default entity',
+        conflictsWithHistory: Boolean(strongHistory && strongHistory.entityId !== r.proposed.entityId),
+      });
+    }
+  }
+  return {
+    lineCount: lines.length,
+    wouldChange: changes.length,
+    changeAmount: Math.round(changes.reduce((s, c) => s + Math.abs(c.amount), 0) * 100) / 100,
+    unchanged,
+    noEntity,
+    splits,
+    conflictsWithHistory: changes.filter((c) => c.conflictsWithHistory).length,
+    history: hist ? { entityId: hist.entityId, confidence: Math.round(hist.confidence * 1000) / 1000 } : null,
+    changes,
+  };
+}
+
+// Which entity (or entities) a stored line belongs to once Paul's latest
+// decision is applied, as [{ entityId, amount }] (entityId null when it
+// can't be told: an unclassified management-file line).
+//   line: { amount, className, qboClassId }
+//   file: { isClassBased, ownerEntityId }
+//   decision: latest decision on the line, or null
+//   resolve: buildEntityResolver(entities)
+function lineEntities(line, file, decision, resolve) {
+  const amount = Number(line.amount) || 0;
+  const d = decision && decision.action !== 'Undo' ? decision : null;
+  if (d && d.action === 'Split' && Array.isArray(d.allocations) && d.allocations.length) {
+    const sign = amount < 0 ? -1 : 1;
+    return d.allocations.map((a) => ({ entityId: a.entityId, amount: sign * Math.abs(Number(a.amount) || 0) }));
+  }
+  if (d && d.action === 'DueToFrom' && d.counterpartyEntityId) return [{ entityId: d.counterpartyEntityId, amount }];
+  if (d && ['Approve', 'Keep', 'Reassign'].includes(d.action) && d.entityId) return [{ entityId: d.entityId, amount }];
+  const entityId = file.isClassBased ? resolve(line.className, line.qboClassId) : file.ownerEntityId || null;
+  return [{ entityId: entityId || null, amount }];
+}
+
 function countStatuses(results) {
   const counts = Object.fromEntries(STATUSES.map((s) => [s, 0]));
   for (const r of results) counts[r.status] += 1;
@@ -538,4 +660,9 @@ module.exports = {
   classifyAccountLines,
   dueAccountEntity,
   detectDueToFromAccounts,
+  ruleSuggestion,
+  lineEntities,
+  historyBreakdown,
+  relabelCandidates,
+  testRule,
 };
