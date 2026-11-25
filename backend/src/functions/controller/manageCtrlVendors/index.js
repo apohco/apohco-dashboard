@@ -4,6 +4,7 @@ const { query, withTransaction } = require('../../../shared/db');
 const { json, withErrorHandling } = require('../../../shared/response');
 const { recordAudit } = require('../../../shared/audit');
 const { buildEntityResolver, lineEntities, testRule } = require('../../../shared/reviewEngine');
+const { aiAgreement } = require('../../../shared/ctrlAiJobs');
 const {
   loadEntities,
   loadFiles,
@@ -311,6 +312,7 @@ async function handleProfile(groupId, vendorId) {
     entitySplit,
     lineCount: lines.length,
     outcome: { ...outcome, approvalRate: decided ? Math.round((outcome.approved / decided) * 1000) / 1000 : null },
+    ai: await aiAgreement(groupId, { vendorId: vendor.vendorid }),
     relabels: relabels.map((r) => ({
       runId: r.runid,
       entityId: r.entityid,

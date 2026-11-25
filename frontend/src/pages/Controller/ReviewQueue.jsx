@@ -39,6 +39,7 @@ import SettingsOutlinedIcon from '@mui/icons-material/SettingsOutlined';
 import VisibilityOutlinedIcon from '@mui/icons-material/VisibilityOutlined';
 import useControllerGroup from '../../hooks/useControllerGroup';
 import ControllerGroupSelect from '../../components/controller/ControllerGroupSelect';
+import { AiPassStatus, AiSettingsFields, AiSuggestion } from '../../components/controller/AiMatching';
 import {
   getControllerOverview,
   getReviewAccounts,
@@ -65,6 +66,7 @@ export const STATUS_INFO = {
 const ACCOUNT_TYPES = ['Expense', 'Revenue', 'Asset', 'Liability', 'Equity', 'Unknown'];
 const ACTION_TEXT = {
   Approve: 'Approve recommendation',
+  AcceptAi: 'Accept AI suggestion',
   Keep: 'Keep current class',
   Reassign: 'Set entity',
   Reclassify: 'Reclassify',
@@ -321,6 +323,10 @@ function SettingsDialog({ open, groupId, onClose }) {
           ...s,
           threshold: Math.round(s.threshold * 100),
           mediumThreshold: Math.round(s.mediumThreshold * 100),
+          aiConfidenceCap: Math.round((s.aiConfidenceCap ?? 0.85) * 100),
+          aiMonthlyBudget: s.aiMonthlyBudget ?? 25,
+          aiEnabled: s.aiEnabled ?? true,
+          aiRedactPatientInfo: s.aiRedactPatientInfo ?? true,
         })
       )
       .catch(setError);
@@ -339,6 +345,10 @@ function SettingsDialog({ open, groupId, onClose }) {
         spikeMinAmount: Number(form.spikeMinAmount),
         recurringMonths: Number(form.recurringMonths),
         baselineMonths: Number(form.baselineMonths),
+        aiEnabled: Boolean(form.aiEnabled),
+        aiConfidenceCap: Number(form.aiConfidenceCap) / 100,
+        aiMonthlyBudget: Number(form.aiMonthlyBudget),
+        aiRedactPatientInfo: Boolean(form.aiRedactPatientInfo),
       });
       onClose(true);
     } catch (err) {
@@ -381,9 +391,10 @@ function SettingsDialog({ open, groupId, onClose }) {
             {field('spikeMinAmount', 'Spend spike, at least ($)', '…and at least this many dollars above it.')}
             {field('recurringMonths', 'Recurring after (months)', 'A vendor charged in each of this many previous months is recurring (2–12).')}
             {field('baselineMonths', 'Average over (months)', 'How many earlier months the averages use (2–24).')}
-            <Typography variant="caption" color="text.secondary">
+            <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 2 }}>
               Trend checks use the new values right away.
             </Typography>
+            <AiSettingsFields groupId={groupId} form={form} setForm={setForm} open={open} />
           </Box>
         )}
       </DialogContent>
@@ -495,7 +506,8 @@ export default function ReviewQueue() {
   const [runsInfo, setRunsInfo] = useState(null);
   const [data, setData] = useState(null);
   const [page, setPage] = useState(0);
-  const [filters, setFilters] = useState({ status: [], reviewState: drill.vendor || drill.account ? 'all' : 'open', accountType: ['Expense'], entityId: '' });
+  const [filters, setFilters] = useState({ status: [], reviewState: drill.vendor || drill.account ? 'all' : 'open', accountType: ['Expense'], entityId: '', ai: '' });
+  const [aiRefresh, setAiRefresh] = useState(0);
   const [text, setText] = useState({ account: drill.account, vendor: drill.vendor, search: '' });
   const debouncedText = useDebounced(JSON.stringify(text), DEBOUNCE_MS);
   const [selected, setSelected] = useState(new Set());
@@ -569,6 +581,7 @@ export default function ReviewQueue() {
       reviewState: filters.reviewState,
       ...(filters.accountType.length ? { accountType: filters.accountType.join(',') } : {}),
       ...(filters.entityId ? { entityId: filters.entityId } : {}),
+      ...(filters.ai ? { ai: filters.ai } : {}),
       ...(t.account.trim() ? { account: t.account.trim() } : {}),
       ...(t.vendor.trim() ? { vendor: t.vendor.trim() } : {}),
       ...(t.search.trim() ? { search: t.search.trim() } : {}),
@@ -605,8 +618,15 @@ export default function ReviewQueue() {
     setError(null);
     try {
       const result = await startReviewRun(groupId, qboId, month);
-      setNotice(`Reviewed ${result.lineCount.toLocaleString()} lines.`);
+      const ai = result.ai;
+      const aiText = ai?.jobId
+        ? ` The AI is looking at ${ai.lineCount.toLocaleString()} line${ai.lineCount === 1 ? '' : 's'} rules and history couldn't settle; suggestions appear as they arrive.`
+        : ai?.skipped
+          ? ` AI: ${ai.skipped}.`
+          : '';
+      setNotice(`Reviewed ${result.lineCount.toLocaleString()} lines.${aiText}`);
       await loadRuns();
+      setAiRefresh((n) => n + 1);
     } catch (err) {
       setError(err);
     } finally {
@@ -651,6 +671,7 @@ export default function ReviewQueue() {
     target.bulk ? bulk(action, extra) : decide({ action, lineIds: target.lineIds, ...extra }, ACTION_TEXT[action]);
   const closeMenu = () => setMenu({ anchor: null, line: null });
   const canApprove = (l) => (kind === 'Account' ? Boolean(l.suggestedAction) : Boolean(l.suggestedEntityId || l.currentEntityId));
+  const canAcceptAi = (l) => Boolean(l.ai && l.ai.action !== 'Unsure') && !busy;
 
   const pageIds = (data?.lines || []).map((l) => l.lineId);
   const allPageSelected = pageIds.length > 0 && pageIds.every((id) => selected.has(id));
@@ -749,6 +770,15 @@ export default function ReviewQueue() {
               to see the rule and history side by side.
             </Alert>
           )}
+          <AiPassStatus
+            groupId={groupId}
+            runId={run?.runId}
+            qboId={qboId}
+            month={month}
+            entityName={entityName}
+            onAnswers={loadLines}
+            refreshKey={aiRefresh}
+          />
           <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap', mb: 2 }}>
             {Object.entries(STATUS_INFO).filter(([status]) => !(kind === 'Account' && status === 'Unclassified')).map(([status, info]) => {
               const s = data.summary[status];
@@ -800,6 +830,12 @@ export default function ReviewQueue() {
                 </MenuItem>
               ))}
             </Select>
+            <Select size="small" displayEmpty value={filters.ai} onChange={(e) => setFilters((f) => ({ ...f, ai: e.target.value }))} sx={{ minWidth: 160 }} inputProps={{ 'aria-label': 'AI filter' }}>
+              <MenuItem value="">Any AI answer</MenuItem>
+              <MenuItem value="suggested">AI suggested</MenuItem>
+              <MenuItem value="unsure">AI unsure</MenuItem>
+              <MenuItem value="none">Not asked</MenuItem>
+            </Select>
           </Box>
 
           <Paper variant="outlined" sx={{ p: 1, mb: 1, display: 'flex', gap: 1, alignItems: 'center', flexWrap: 'wrap' }} data-testid="bulk-bar">
@@ -815,6 +851,9 @@ export default function ReviewQueue() {
             <Box sx={{ flex: 1 }} />
             <Button size="small" variant="contained" disabled={!selectionCount || Boolean(busy)} onClick={() => (allMatching ? setConfirmBulk('Approve') : bulk('Approve'))}>
               Approve recommendation
+            </Button>
+            <Button size="small" variant="outlined" disabled={!selectionCount || Boolean(busy)} onClick={() => (allMatching ? setConfirmBulk('AcceptAi') : bulk('AcceptAi'))}>
+              Accept AI suggestions
             </Button>
             <Button size="small" disabled={!selectionCount || Boolean(busy)} onClick={() => (allMatching ? setConfirmBulk('Keep') : bulk('Keep'))}>
               {keepText(kind)}
@@ -854,6 +893,7 @@ export default function ReviewQueue() {
                   <TableCell align="right">Amount</TableCell>
                   {kind === 'Class' && <TableCell>Class now</TableCell>}
                   <TableCell>Suggested</TableCell>
+                  <TableCell>AI</TableCell>
                   <TableCell>Status</TableCell>
                   <TableCell>Decision</TableCell>
                   <TableCell />
@@ -891,6 +931,15 @@ export default function ReviewQueue() {
                         </Typography>
                       )}
                     </TableCell>
+                    <TableCell sx={{ maxWidth: 200 }}>
+                      <AiSuggestion
+                        ai={l.ai}
+                        entityName={entityName}
+                        canAccept={canAcceptAi(l)}
+                        busy={Boolean(busy)}
+                        onAccept={() => decide({ action: 'AcceptAi', lineIds: [l.lineId] }, ACTION_TEXT.AcceptAi)}
+                      />
+                    </TableCell>
                     <TableCell>
                       <Tooltip title={<Box component="ul" sx={{ m: 0, pl: 2 }}>{l.reasons.map((r) => <li key={r}>{r}</li>)}</Box>}>
                         <Chip size="small" variant="outlined" color={STATUS_INFO[l.status].color} label={STATUS_INFO[l.status].label} />
@@ -913,7 +962,7 @@ export default function ReviewQueue() {
                 ))}
                 {data.lines.length === 0 && (
                   <TableRow>
-                    <TableCell colSpan={11} sx={{ color: 'text.secondary' }}>
+                    <TableCell colSpan={12} sx={{ color: 'text.secondary' }}>
                       No lines match these filters.
                     </TableCell>
                   </TableRow>

@@ -7,20 +7,18 @@ const getClient = () => {
   return client;
 };
 
-// Sends one message per Controller sync task ({ taskId }) to the GL pull
-// queue, 10 per SendMessageBatch call (the SQS maximum). Returns the
-// taskIds SQS did not accept, so the caller can mark them Failed instead
-// of leaving them Queued forever.
-async function enqueueTasks(taskIds, { queueUrl = process.env.CTRL_GL_PULL_QUEUE_URL, sqs = getClient() } = {}) {
-  if (!queueUrl) throw new Error('CTRL_GL_PULL_QUEUE_URL is not set');
+// Sends one message per id ({ [field]: id }) to `queueUrl`, 10 per
+// SendMessageBatch call (the SQS maximum). Returns the ids SQS did not
+// accept, so the caller can mark them Failed instead of leaving them
+// Queued forever.
+async function enqueueIds(ids, field, queueUrl, sqs) {
   const failed = [];
-
-  for (const batch of chunk(taskIds, 10)) {
+  for (const batch of chunk(ids, 10)) {
     try {
       const result = await sqs.send(
         new SendMessageBatchCommand({
           QueueUrl: queueUrl,
-          Entries: batch.map((taskId, i) => ({ Id: String(i), MessageBody: JSON.stringify({ taskId }) })),
+          Entries: batch.map((id, i) => ({ Id: String(i), MessageBody: JSON.stringify({ [field]: id }) })),
         })
       );
       for (const f of result.Failed || []) failed.push(batch[Number(f.Id)]);
@@ -29,8 +27,19 @@ async function enqueueTasks(taskIds, { queueUrl = process.env.CTRL_GL_PULL_QUEUE
       failed.push(...batch);
     }
   }
-
   return failed;
 }
 
-module.exports = { enqueueTasks };
+// One message per Controller sync task ({ taskId }) to the GL pull queue.
+async function enqueueTasks(taskIds, { queueUrl = process.env.CTRL_GL_PULL_QUEUE_URL, sqs = getClient() } = {}) {
+  if (!queueUrl) throw new Error('CTRL_GL_PULL_QUEUE_URL is not set');
+  return enqueueIds(taskIds, 'taskId', queueUrl, sqs);
+}
+
+// One message per AI batch ({ batchId }) to the AI queue.
+async function enqueueAiBatches(batchIds, { queueUrl = process.env.CTRL_AI_QUEUE_URL, sqs = getClient() } = {}) {
+  if (!queueUrl) throw new Error('CTRL_AI_QUEUE_URL is not set');
+  return enqueueIds(batchIds, 'batchId', queueUrl, sqs);
+}
+
+module.exports = { enqueueTasks, enqueueAiBatches };

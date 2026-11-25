@@ -18,6 +18,13 @@ const DEFAULT_SETTINGS = {
   recurringMonths: 3,
   baselineMonths: 6,
 };
+// AI matching (Phase 3). Kept apart from the numeric settings above.
+const AI_DEFAULTS = {
+  aiEnabled: true,
+  aiConfidenceCap: 0.85,
+  aiMonthlyBudget: 25,
+  aiRedactPatientInfo: true,
+};
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 function badRequest(message, statusCode = 400) {
   const err = new Error(message);
@@ -36,14 +43,20 @@ function shiftMonth(month, delta) {
 
 async function loadSettings(groupId, db = { query }) {
   const { rows } = await db.query(
-    `SELECT Threshold, MediumThreshold, HistoryMonths, SplitShiftPoints, SpikePercent, SpikeMinAmount, RecurringMonths, BaselineMonths
+    `SELECT Threshold, MediumThreshold, HistoryMonths, SplitShiftPoints, SpikePercent, SpikeMinAmount, RecurringMonths, BaselineMonths,
+            AiEnabled, AiConfidenceCap, AiMonthlyBudget, AiRedactPatientInfo
      FROM CtrlReviewSettings WHERE GroupId = $1`,
     [groupId]
   );
-  if (!rows.length) return { ...DEFAULT_SETTINGS };
+  if (!rows.length) return { ...DEFAULT_SETTINGS, ...AI_DEFAULTS };
   const r = rows[0];
   const num = (v, fallback) => (v === undefined || v === null ? fallback : Number(v));
+  const bool = (v, fallback) => (v === undefined || v === null ? fallback : Boolean(v));
   return {
+    aiEnabled: bool(r.aienabled, AI_DEFAULTS.aiEnabled),
+    aiConfidenceCap: num(r.aiconfidencecap, AI_DEFAULTS.aiConfidenceCap),
+    aiMonthlyBudget: num(r.aimonthlybudget, AI_DEFAULTS.aiMonthlyBudget),
+    aiRedactPatientInfo: bool(r.airedactpatientinfo, AI_DEFAULTS.aiRedactPatientInfo),
     threshold: Number(r.threshold),
     mediumThreshold: Number(r.mediumthreshold),
     historyMonths: Number(r.historymonths),
@@ -73,6 +86,17 @@ function validateSettings(body) {
   if (!(s.splitShiftPoints > 0 && s.splitShiftPoints <= 100)) throw badRequest('splitShiftPoints must be more than 0 and at most 100');
   if (!(s.spikePercent > 0 && s.spikePercent <= 10000)) throw badRequest('spikePercent must be more than 0');
   if (!(s.spikeMinAmount >= 0 && s.spikeMinAmount < 1e9)) throw badRequest('spikeMinAmount must be 0 or more');
+
+  // AI settings left out keep their defaults.
+  const given = (key) => body[key] !== undefined && body[key] !== null && body[key] !== '';
+  for (const key of ['aiEnabled', 'aiRedactPatientInfo']) {
+    if (given(key) && typeof body[key] !== 'boolean') throw badRequest(`${key} must be true or false`);
+    s[key] = given(key) ? body[key] : AI_DEFAULTS[key];
+  }
+  s.aiConfidenceCap = given('aiConfidenceCap') ? Number(body.aiConfidenceCap) : AI_DEFAULTS.aiConfidenceCap;
+  s.aiMonthlyBudget = given('aiMonthlyBudget') ? Number(body.aiMonthlyBudget) : AI_DEFAULTS.aiMonthlyBudget;
+  if (!(s.aiConfidenceCap >= 0.5 && s.aiConfidenceCap <= 1)) throw badRequest('aiConfidenceCap must be between 0.5 and 1');
+  if (!(s.aiMonthlyBudget >= 0 && s.aiMonthlyBudget <= 10000)) throw badRequest('aiMonthlyBudget must be from 0 to 10000');
   return s;
 }
 
@@ -147,6 +171,31 @@ async function loadHistoryRows(client, groupId, qboId, month, historyMonths) {
      JOIN snaps s ON s.SnapshotId = l.SnapshotId
      LEFT JOIN dec d ON d.Fingerprint = l.Fingerprint
      GROUP BY l.PayeeName, l.AccountCode, l.ClassName, l.QBOClassId, d.Action, d.EntityId, d.Allocations`,
+    [groupId, qboId, `${shiftMonth(month, -historyMonths)}-01`, `${month}-01`]
+  );
+  return rows;
+}
+
+// Account history for a practice file over the months before `month`: the
+// latest snapshot of each month, with Paul's latest decision per line.
+async function loadAccountHistoryRows(client, groupId, qboId, month, historyMonths) {
+  const { rows } = await client.query(
+    `WITH snaps AS (
+       SELECT DISTINCT ON (Period) SnapshotId FROM CtrlSnapshots
+       WHERE GroupId = $1 AND QBOId = $2 AND Period >= $3 AND Period < $4
+       ORDER BY Period, PulledAt DESC
+     ),
+     dec AS (
+       SELECT DISTINCT ON (Fingerprint) Fingerprint, Action, TargetAccountCode, TargetAccountName, CounterpartyEntityId
+       FROM CtrlDecisions WHERE GroupId = $1 AND QBOId = $2
+       ORDER BY Fingerprint, DecidedAt DESC
+     )
+     SELECT l.PayeeName, l.AccountCode, l.AccountName,
+            d.Action, d.TargetAccountCode, d.TargetAccountName, d.CounterpartyEntityId, COUNT(*)::int AS n
+     FROM CtrlLedgerLines l
+     JOIN snaps s ON s.SnapshotId = l.SnapshotId
+     LEFT JOIN dec d ON d.Fingerprint = l.Fingerprint
+     GROUP BY l.PayeeName, l.AccountCode, l.AccountName, d.Action, d.TargetAccountCode, d.TargetAccountName, d.CounterpartyEntityId`,
     [groupId, qboId, `${shiftMonth(month, -historyMonths)}-01`, `${month}-01`]
   );
   return rows;
@@ -350,6 +399,8 @@ async function loadStoredMonths(groupId) {
 
 module.exports = {
   DEFAULT_SETTINGS,
+  AI_DEFAULTS,
+  loadAccountHistoryRows,
   UUID_RE,
   badRequest,
   isUuid,

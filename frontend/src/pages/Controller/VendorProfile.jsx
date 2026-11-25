@@ -98,6 +98,9 @@ export default function VendorProfile() {
             <Stat label="Approval rate" value={data.outcome.approvalRate === null ? '—' : `${Math.round(data.outcome.approvalRate * 100)}%`} />
             <Stat label="Approved · corrected · open" value={`${data.outcome.approved} · ${data.outcome.corrected} · ${data.outcome.open}`} />
             {data.outcome.relabeled > 0 && <Stat label="Relabeled history" value={data.outcome.relabeled.toLocaleString()} />}
+            {data.ai?.decided > 0 && (
+              <Stat label="AI suggestions you agreed with" value={`${data.ai.agreed} of ${data.ai.decided} (${Math.round(data.ai.agreeRate * 100)}%)`} />
+            )}
           </Box>
 
           <Paper variant="outlined" sx={{ p: 2, mb: 2 }}>

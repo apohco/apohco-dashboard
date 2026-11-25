@@ -31,6 +31,7 @@ describe('VendorProfile page', () => {
       entitySplit: [{ month: '2026-08', entityId: 'leb', amount: 100 }, { month: '2026-10', entityId: 'mil', amount: 50 }],
       lineCount: 14,
       outcome: { approved: 6, corrected: 2, relabeled: 37, open: 6, approvalRate: 0.75 },
+      ai: { suggested: 12, decided: 10, agreed: 9, agreeRate: 0.9 },
       relabels: [{ runId: 'run-1', entityId: 'leb', requestAje: false, decidedAt: '2026-11-21T10:00:00Z', decidedBy: 'paul', lineCount: 37, amount: 4210, fromMonth: '2026-01', toMonth: '2026-09' }],
       corrections: [
         { decisionId: 'd1', action: 'Reassign', entityId: 'leb', className: 'Milford', scope: 'Line', decidedAt: '2026-11-21T10:00:00Z', decidedBy: 'paul', qboName: 'APOHCO', txnDate: '2026-09-02', memo: 'store', amount: 25, account: '6100 Supplies' },
@@ -50,6 +51,7 @@ describe('VendorProfile page', () => {
     expect(getVendorProfile).toHaveBeenCalledWith('g1', 'v1');
     expect(screen.getByText('$150.00')).toBeInTheDocument();
     expect(screen.getByText('75%')).toBeInTheDocument();
+    expect(screen.getByText('9 of 10 (90%)')).toBeInTheDocument();
     expect(screen.getByText('Rule wins')).toBeInTheDocument();
     expect(screen.getByText('"Route 50" → Milford')).toBeInTheDocument();
     expect(screen.getByText('Milford → Lebanon')).toBeInTheDocument();

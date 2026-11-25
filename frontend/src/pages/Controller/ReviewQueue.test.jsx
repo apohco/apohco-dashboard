@@ -13,6 +13,10 @@ vi.mock('../../api/controller', () => ({
   saveReviewDecisions: vi.fn(),
   saveReviewSettings: vi.fn(),
   startReviewRun: vi.fn(),
+  getAiStatus: vi.fn(),
+  getAiUsage: vi.fn(),
+  startAiJob: vi.fn(),
+  getAiJob: vi.fn(),
 }));
 vi.mock('../../api/settings', () => ({ listGroups: vi.fn() }));
 
@@ -26,9 +30,18 @@ import {
   saveReviewDecisions,
   saveReviewSettings,
   startReviewRun,
+  getAiStatus,
+  getAiUsage,
 } from '../../api/controller';
 import { listGroups } from '../../api/settings';
 import ReviewQueue, { confidenceLabel, describeDecision, describeSuggestion, splitFromTemplate } from './ReviewQueue';
+
+// AI matching (Phase 3): no AI answers unless a test says otherwise.
+const AI_IDLE = { enabled: true, confidenceCap: 0.85, monthSpend: 0, monthlyBudget: 25, answered: 0, suggested: 0, job: null };
+beforeEach(() => {
+  getAiStatus.mockResolvedValue(AI_IDLE);
+  getAiUsage.mockResolvedValue({ monthSpend: 1.25, agreement: { decided: 0 } });
+});
 
 const ENTITIES = [
   { entityId: 'leb', entityName: 'Lebanon' },
@@ -380,6 +393,7 @@ describe('Phase 2b: drill-down links, conflicts prompt, trend settings', () => {
     await user.click(screen.getByRole('button', { name: 'Save' }));
     expect(saveReviewSettings).toHaveBeenCalledWith('g1', {
       threshold: 0.9, mediumThreshold: 0.7, historyMonths: 12, splitShiftPoints: 25, spikePercent: 50, spikeMinAmount: 750, recurringMonths: 3, baselineMonths: 6,
+      aiEnabled: true, aiConfidenceCap: 0.85, aiMonthlyBudget: 25, aiRedactPatientInfo: true,
     });
   });
 });

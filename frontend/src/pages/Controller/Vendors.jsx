@@ -30,6 +30,7 @@ import {
 import useControllerGroup from '../../hooks/useControllerGroup';
 import ControllerGroupSelect from '../../components/controller/ControllerGroupSelect';
 import { listVendors, mergeVendor, testVendorRule, updateVendor } from '../../api/controller';
+import { AiRuleTest } from '../../components/controller/AiMatching';
 import { formatCurrency } from '../../utils/format';
 
 const errorText = (err) => err?.response?.data?.message || err?.message;
@@ -247,7 +248,7 @@ function VendorDialog({ vendor, vendors, entities, groupId, onClose }) {
           minRows={2}
           size="small"
           label="Written rule"
-          helperText="Plain English, e.g. where the invoices are and what decides the practice. Stored and versioned now; the AI reads it from Phase 3."
+          helperText="Plain English, e.g. where the invoices are and what decides the practice. The AI follows it for lines the structured rule doesn't settle."
           value={form.ruleText}
           onChange={(e) => set('ruleText', e.target.value)}
           sx={{ mt: 2 }}
@@ -263,6 +264,7 @@ function VendorDialog({ vendor, vendors, entities, groupId, onClose }) {
           rule={{ defaultEntityId: toBody(form).rule.defaultEntityId, keywords: toBody(form).rule.keywords }}
           entities={entities}
         />
+        <AiRuleTest groupId={groupId} vendorId={vendor.vendorId} ruleText={form.ruleText || ''} entities={entities} />
 
         <Divider sx={{ my: 2 }} />
         <Typography variant="subtitle2">Default split</Typography>

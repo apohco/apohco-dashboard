@@ -451,3 +451,97 @@ decisions applied), each top vendor's split by entity, and the trend checks
 for a month: split shift, spend spike, new vendor, missing recurring charge,
 each linking to the lines in Review. Thresholds are in Review → Settings
 (start: 25 points; +50% and $500; 3 months; 6-month average).
+
+### 9.9 AI matching (Phase 3: Claude on Amazon Bedrock)
+
+Deploy: `npm run db:migrate` applies `013_controller_ai.sql` (AI settings on
+review settings; `CtrlAiJobs`, `CtrlAiBatches`, `CtrlAiSuggestions`,
+`CtrlAiCalls`; `SuggestionSource` on decisions). `sam deploy` adds:
+
+- the `apohco-ctrl-ai-<stage>` queue and its dead-letter queue;
+- `ctrlAiWorker` (queue worker; the only function allowed to call Bedrock:
+  `bedrock:InvokeModel` on Anthropic models through the `us.` inference
+  profile, so requests are served from US regions only);
+- `ctrlAi` (`/api/controller/ai/status`, `/usage`, `/jobs`, `/jobs/{jobId}`);
+- SQS send permission and `CTRL_AI_QUEUE_URL` on `ctrlReview`.
+
+Settings (template.yaml, `Globals`): `AI_MODEL_ID`
+(`us.anthropic.claude-opus-5-5`) and `AI_EFFORT` (`low`). Optional
+`AI_PRICE_INPUT` / `AI_PRICE_OUTPUT` / `AI_PRICE_CACHE_READ` /
+`AI_PRICE_CACHE_WRITE` (USD per million tokens) adjust the cost estimate.
+Model access: the account could already invoke Claude Opus 5.5 through
+`bedrock-runtime` when Phase 3 was built. If a call ever fails with an access
+error, enable the model under Bedrock → Model access (us-east-2). The newer
+Bedrock "Mantle" endpoint returned 404 for this account, so the app uses the
+standard `bedrock-runtime` API.
+
+How it works:
+
+- **Run review** works as before, then starts an **AI pass** in the
+  background for the lines rules and history couldn't settle (below the
+  confidence threshold, or vendors whose written rule the engine can't
+  read). Only expense and revenue lines are sent, never the bank or card
+  side of a transaction. Conflicts and decided lines are skipped. At most
+  500 lines per run, in batches of up to 25 (one model call each).
+- The queue shows an **AI** column (suggestion, confidence, reason as a
+  tooltip) and an AI filter. **Accept AI** (per line, or in bulk) records
+  the suggestion as your decision. AI confidence is capped (default 85%,
+  below the 90% threshold), so every AI suggestion waits for you.
+- **Check AI accuracy** re-asks the AI about up to 50 lines you already
+  decided, without showing it your answers, and reports how often it agrees.
+  **Test with AI** in the vendor dialog tries a draft written rule on the
+  vendor's recent lines. Neither changes anything.
+- Review → Settings → **AI matching**: on/off, confidence cap, **monthly
+  budget** (default $25; batches stop when this month's estimated spend
+  reaches it) and **Withhold payee and memo on refund and patient lines**
+  (on by default; no AWS BAA has been confirmed).
+- Cost: about $0.05 per batch with Claude Opus 5.5 (October 2026: about
+  $1 for a full AI pass of the management file). Every call is logged in
+  `CtrlAiCalls`.
+
+Troubleshooting: a batch that fails 3 times is marked Failed (shown on the AI
+bar) and its message lands in the dead-letter queue. "Run AI pass" / "Ask AI
+about remaining lines" asks again only about lines without an answer.
+
+## 10. Before Phase 4: Google Workspace (Gmail and Drive evidence)
+
+Phase 4 searches Gmail and Drive for invoices and receipts that support a
+line, and saves confirmed evidence. It reads mail and files through a Google
+service account with **domain-wide delegation**, limited to the mailboxes
+and folders you list. These steps need a Google Workspace **super admin**.
+Nothing here can be done from the dashboard, and no key should ever be
+pasted into chat or email.
+
+1. **Google Cloud project** (console.cloud.google.com, signed in with the
+   Workspace admin account): create a project, e.g. `apohco-controller`.
+   Under APIs & Services → Library, enable the **Gmail API** and the
+   **Google Drive API**.
+2. **Service account**: IAM & Admin → Service Accounts → Create, e.g.
+   `controller-evidence`. Grant it no project roles. Open it and note its
+   **Unique ID** (the numeric client ID).
+3. **Key**: on the service account, Keys → Add key → JSON. Store it in AWS
+   Secrets Manager yourself, then delete the downloaded file:
+
+   ```bash
+   aws secretsmanager create-secret --region us-east-2 \
+     --name apohco-dashboard/google-service-account \
+     --secret-string file://controller-evidence-key.json
+   ```
+
+   Phase 4 lets only the evidence Lambdas read this secret. (If your
+   organization blocks key creation with the
+   `iam.disableServiceAccountKeyCreation` policy, tell me and I'll set up
+   keyless access through Workload Identity Federation instead.)
+4. **Domain-wide delegation** (admin.google.com → Security → Access and data
+   control → API controls → Manage Domain Wide Delegation → Add new): the
+   client ID from step 2, with exactly these scopes:
+
+   ```
+   https://www.googleapis.com/auth/gmail.readonly,https://www.googleapis.com/auth/drive.readonly,https://www.googleapis.com/auth/drive.file
+   ```
+
+   Read-only for mail and files. `drive.file` only lets the app write files
+   it creates itself (the evidence folder it makes for saved support).
+5. **Tell me** (no secrets): the mailboxes to search (e.g. your own,
+   accounting@...), and the Drive folders or shared drives that hold
+   invoices. Phase 4 searches only those, and only for lines in review.

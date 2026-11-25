@@ -49,6 +49,9 @@ Globals:
         APP_SECRETS_ARN: !Ref AppSecretsArn
         FRONTEND_URL: !Ref FrontendUrl
         STAGE: !Ref Stage
+        # Controller AI matching (Phase 3): Claude on Amazon Bedrock.
+        AI_MODEL_ID: us.anthropic.claude-opus-5-5
+        AI_EFFORT: low
     VpcConfig:
       SubnetIds: !Ref VpcSubnetIds
       SecurityGroupIds: !Ref VpcSecurityGroupIds
@@ -736,8 +739,22 @@ Resources:
       FunctionName: ctrlReview
       Handler: src/functions/controller/ctrlReview/index.handler
       MemorySize: 512
-      Policies: *lambdaPolicies
-      Environment: *cognitoAuthEnv
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: secretsmanager:GetSecretValue
+              Resource:
+                - !Ref DbCredentialsSecretArn
+                - !Ref AppSecretsArn
+        - VPCAccessPolicy: {}
+        # A review run starts its AI pass (Phase 3).
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt CtrlAiQueue.QueueName
+      Environment:
+        Variables:
+          COGNITO_USER_POOL_ID: !Ref ApohcoUserPool
+          COGNITO_CLIENT_ID: !Ref ApohcoUserPoolClient
+          CTRL_AI_QUEUE_URL: !Ref CtrlAiQueue
       Events:
         Settings:
           Type: Api
@@ -775,6 +792,112 @@ Resources:
             RestApiId: !Ref ApohcoDashboardApi
             Path: /api/controller/review/due-to-from
             Method: put
+
+  # --- Controller Phase 3: AI matching (Claude on Amazon Bedrock) ---
+  # One message per AI batch ({ batchId }), i.e. one model call. Visibility
+  # timeout is 6x the worker timeout; after 3 failed receives a message
+  # goes to the dead-letter queue (the worker marks the batch Failed on
+  # its 3rd attempt).
+  CtrlAiDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub apohco-ctrl-ai-dlq-${Stage}
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+
+  CtrlAiQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub apohco-ctrl-ai-${Stage}
+      VisibilityTimeout: 1800
+      MessageRetentionPeriod: 86400
+      SqsManagedSseEnabled: true
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt CtrlAiDeadLetterQueue.Arn
+        maxReceiveCount: 3
+
+  # Reads stored GL lines, asks the model, stores suggestions. Never calls
+  # QuickBooks. The only function allowed to call Bedrock.
+  CtrlAiWorkerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: ctrlAiWorker
+      Handler: src/functions/controller/ctrlAiWorker/index.handler
+      Timeout: 300
+      MemorySize: 512
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: secretsmanager:GetSecretValue
+              Resource:
+                - !Ref DbCredentialsSecretArn
+                - !Ref AppSecretsArn
+            # Anthropic models only, through a US inference profile (which
+            # routes to the model in any US region).
+            - Effect: Allow
+              Action: bedrock:InvokeModel
+              Resource:
+                - !Sub arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/us.anthropic.*
+                - arn:aws:bedrock:us-east-1::foundation-model/anthropic.*
+                - arn:aws:bedrock:us-east-2::foundation-model/anthropic.*
+                - arn:aws:bedrock:us-west-2::foundation-model/anthropic.*
+        - VPCAccessPolicy: {}
+      Events:
+        Queue:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt CtrlAiQueue.Arn
+            BatchSize: 1
+            ScalingConfig:
+              MaximumConcurrency: 2
+
+  # AI jobs (start / progress / results) and usage. Database + queue only.
+  CtrlAiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: ctrlAi
+      Handler: src/functions/controller/ctrlAi/index.handler
+      MemorySize: 512
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: secretsmanager:GetSecretValue
+              Resource:
+                - !Ref DbCredentialsSecretArn
+                - !Ref AppSecretsArn
+        - VPCAccessPolicy: {}
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt CtrlAiQueue.QueueName
+      Environment:
+        Variables:
+          COGNITO_USER_POOL_ID: !Ref ApohcoUserPool
+          COGNITO_CLIENT_ID: !Ref ApohcoUserPoolClient
+          CTRL_AI_QUEUE_URL: !Ref CtrlAiQueue
+      Events:
+        Status:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/controller/ai/status
+            Method: get
+        Usage:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/controller/ai/usage
+            Method: get
+        Jobs:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/controller/ai/jobs
+            Method: post
+        Job:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/controller/ai/jobs/{jobId}
+            Method: get
 
   # Phase 2b: conflicts queue (rule vs history) and its three resolutions.
   # Database only; no QuickBooks calls.

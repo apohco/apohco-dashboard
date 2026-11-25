@@ -156,6 +156,9 @@ describe('Phase 2b: stats, profile and rule test', () => {
     ]);
     // The relabeled line is counted on its own, not as a correction.
     expect(data.outcome).toEqual({ approved: 1, corrected: 1, relabeled: 1, open: 2, approvalRate: 0.5 });
+    // No AI suggestions for this vendor yet.
+    expect(data.ai).toEqual({ suggested: 0, decided: 0, agreed: 0, agreeRate: null });
+    expect(query.mock.calls.some(([sql, params]) => /FROM CtrlAiSuggestions a/.test(sql) && params[2] === data.vendor.vendorId)).toBe(true);
     expect(data.relabels).toEqual([{ runId: 'run-1', entityId: 'ent-leb', requestAje: false, decidedAt: 'now', decidedBy: 'paul', lineCount: 37, amount: 4210.5, fromMonth: '2026-01', toMonth: '2026-09' }]);
     const corrections = query.mock.calls.find(([sql]) => /LIMIT 100/.test(sql))[0];
     expect(corrections).toMatch(/d.Scope = 'Line'/);

@@ -1,5 +1,6 @@
 jest.mock('../../src/shared/verifyToken', () => ({ requireAuth: jest.fn() }));
 jest.mock('../../src/shared/db', () => ({ query: jest.fn(), withTransaction: jest.fn() }));
+jest.mock('../../src/shared/ctrlAiJobs', () => ({ startReviewAiJob: jest.fn(async () => ({ skipped: 'No lines need the AI' })) }));
 
 const { requireAuth } = require('../../src/shared/verifyToken');
 const { query, withTransaction } = require('../../src/shared/db');
@@ -43,6 +44,7 @@ describe('helpers', () => {
   test('validateSettings', () => {
     expect(validateSettings({ threshold: 0.9, mediumThreshold: 0.7, historyMonths: 12 })).toEqual({
       threshold: 0.9, mediumThreshold: 0.7, historyMonths: 12, splitShiftPoints: 25, spikePercent: 50, spikeMinAmount: 500, recurringMonths: 3, baselineMonths: 6,
+      aiEnabled: true, aiConfidenceCap: 0.85, aiMonthlyBudget: 25, aiRedactPatientInfo: true,
     });
     const base = { threshold: 0.9, mediumThreshold: 0.7, historyMonths: 12 };
     expect(validateSettings({ ...base, splitShiftPoints: 30, spikeMinAmount: 0 })).toMatchObject({ splitShiftPoints: 30, spikeMinAmount: 0 });
@@ -225,7 +227,7 @@ describe('POST /api/controller/review/decisions', () => {
     });
     expect(parseBody(res)).toEqual({ decided: 1, skipped: { alreadyDecided: 1, watchMode: 1, nothingToApply: 1, noDueToFromAccount: 0 } });
     const params = decisionsInsert()[1];
-    expect(params).toEqual(['group-1', 'qbo-mgmt', 'f1', L1, RUN_ID, 'Approve', 'ent-leb', null, null, 'user-paul', null, null, null]);
+    expect(params).toEqual(['group-1', 'qbo-mgmt', 'f1', L1, RUN_ID, 'Approve', 'ent-leb', null, null, 'user-paul', null, null, null, 'Engine']);
   });
 
   test('bulk by filter stops if the matching lines changed since the user looked', async () => {
@@ -239,7 +241,7 @@ describe('POST /api/controller/review/decisions', () => {
     setup({ routes: [[/FROM CtrlSuggestions s/, { rows: [{ ...candidates[2], decided: true }] }]] });
     const res = await post('/api/controller/review/decisions', { runId: RUN_ID, action: 'Reassign', entityId: 'ent-mil', lineIds: [L3], note: ' wrong store ' });
     expect(parseBody(res).decided).toBe(1);
-    expect(decisionsInsert()[1]).toEqual(['group-1', 'qbo-mgmt', 'f3', L3, RUN_ID, 'Reassign', 'ent-mil', null, 'wrong store', 'user-paul', null, null, null]);
+    expect(decisionsInsert()[1]).toEqual(['group-1', 'qbo-mgmt', 'f3', L3, RUN_ID, 'Reassign', 'ent-mil', null, 'wrong store', 'user-paul', null, null, null, null]);
   });
 
   test('split stores allocations that add up to the line amount', async () => {
@@ -321,10 +323,10 @@ describe('account review: Reclassify and Due To/From', () => {
     const res = await send({ action: 'Approve', filter: {}, expectedCount: 5 });
     expect(parseBody(res)).toEqual({ decided: 3, skipped: { alreadyDecided: 0, watchMode: 0, nothingToApply: 1, noDueToFromAccount: 1 } });
     const p = decisionRows();
-    // 13 columns per decision.
-    expect(p.slice(0, 13)).toEqual(['group-1', 'qbo-mil', 'f1', L1, RUN_ID, 'Reclassify', null, null, null, 'user-paul', '6150', 'Breakroom', null]);
-    expect(p.slice(13, 26)).toEqual(['group-1', 'qbo-mil', 'f2', L2, RUN_ID, 'DueToFrom', null, null, null, 'user-paul', '1500', 'Due From Lebanon', 'ent-leb']);
-    expect(p.slice(26, 39)).toEqual(['group-1', 'qbo-mil', 'f4', L4, RUN_ID, 'Keep', null, null, null, 'user-paul', null, null, null]);
+    // 14 columns per decision.
+    expect(p.slice(0, 14)).toEqual(['group-1', 'qbo-mil', 'f1', L1, RUN_ID, 'Reclassify', null, null, null, 'user-paul', '6150', 'Breakroom', null, 'Engine']);
+    expect(p.slice(14, 28)).toEqual(['group-1', 'qbo-mil', 'f2', L2, RUN_ID, 'DueToFrom', null, null, null, 'user-paul', '1500', 'Due From Lebanon', 'ent-leb', 'Engine']);
+    expect(p.slice(28, 42)).toEqual(['group-1', 'qbo-mil', 'f4', L4, RUN_ID, 'Keep', null, null, null, 'user-paul', null, null, null, 'Engine']);
   });
 
   test('reclassify moves lines to an account in the file and skips lines already there', async () => {
@@ -433,6 +435,7 @@ describe('settings', () => {
     setup();
     expect(parseBody(await get('/api/controller/review/settings'))).toEqual({
       threshold: 0.9, mediumThreshold: 0.7, historyMonths: 12, splitShiftPoints: 25, spikePercent: 50, spikeMinAmount: 500, recurringMonths: 3, baselineMonths: 6,
+      aiEnabled: true, aiConfidenceCap: 0.85, aiMonthlyBudget: 25, aiRedactPatientInfo: true,
     });
   });
 
@@ -443,7 +446,7 @@ describe('settings', () => {
     );
     expect(res.statusCode).toBe(200);
     const upsert = query.mock.calls.find(([sql]) => /INSERT INTO CtrlReviewSettings/.test(sql));
-    expect(upsert[1]).toEqual(['group-1', 0.85, 0.6, 24, 'user-paul', 25, 50, 500, 3, 6]);
+    expect(upsert[1]).toEqual(['group-1', 0.85, 0.6, 24, 'user-paul', 25, 50, 500, 3, 6, true, 0.85, 25, true]);
   });
 });
 

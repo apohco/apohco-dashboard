@@ -115,3 +115,18 @@ export const updateVendor = (groupId, vendorId, body) =>
 
 export const mergeVendor = (groupId, vendorId, fromVendorId) =>
   apiClient.post(`/api/controller/vendors/${vendorId}/merge`, { groupId, fromVendorId }).then((r) => r.data);
+
+// AI matching (Phase 3). The AI only suggests; nothing is decided here.
+export const getAiStatus = (groupId, runId) =>
+  apiClient.get('/api/controller/ai/status', { params: { groupId, runId } }).then((r) => r.data);
+
+export const getAiUsage = (groupId) =>
+  apiClient.get('/api/controller/ai/usage', { params: { groupId } }).then((r) => r.data);
+
+// body: { kind: 'Review', runId } | { kind: 'RuleTest', vendorId, ruleText, months? }
+//     | { kind: 'Backtest', qboId, month? }
+export const startAiJob = (groupId, body) =>
+  apiClient.post('/api/controller/ai/jobs', { groupId, ...body }).then((r) => r.data);
+
+export const getAiJob = (groupId, jobId) =>
+  apiClient.get(`/api/controller/ai/jobs/${jobId}`, { params: { groupId } }).then((r) => r.data);

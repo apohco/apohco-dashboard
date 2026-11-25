@@ -263,4 +263,4 @@ Each phase ships something Paul can use on its own; the AI and Google pieces com
 - [ ] Accountant: who gets the portal login, and is it one firm or several?
 - [ ] Grouped AJE default: grouped or per line as the starting toggle?
 - [ ] Confidence threshold for "likely misclassified" (start at 80% and tune?).
-- [ ] AI provider: Claude via Amazon Bedrock (keeps everything inside AWS) or the Anthropic API directly.
+- [x] AI provider: Claude via Amazon Bedrock (decided 2026-11-25; Claude Opus 5.5 through a US inference profile).

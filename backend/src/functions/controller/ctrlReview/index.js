@@ -18,6 +18,7 @@ const {
   classifyAccountLines,
 } = require('../../../shared/reviewEngine');
 const { accountKey } = require('../../../shared/accountKey');
+const { startReviewAiJob } = require('../../../shared/ctrlAiJobs');
 const {
   badRequest,
   isUuid,
@@ -28,6 +29,7 @@ const {
   loadRun,
   loadRules,
   loadHistoryRows,
+  loadAccountHistoryRows,
   loadAccountTypes,
   loadFileAccounts,
   resolveAccount,
@@ -44,7 +46,10 @@ const DEFAULT_LIMIT = 100;
 const MAX_LIMIT = 500;
 const MAX_DECISIONS_PER_REQUEST = 10000;
 const ACCOUNT_TYPES = ['Asset', 'Liability', 'Equity', 'Revenue', 'Expense', 'Unknown'];
-const BULK_ACTIONS = ['Approve', 'Keep', 'Reassign', 'Reclassify', 'DueToFrom'];
+// AcceptAi: apply the AI's suggestion (recorded as the concrete action it
+// stands for, marked SuggestionSource 'AI').
+const BULK_ACTIONS = ['Approve', 'AcceptAi', 'Keep', 'Reassign', 'Reclassify', 'DueToFrom'];
+const AI_FILTERS = ['suggested', 'unsure', 'none'];
 // Entity assignment only makes sense where lines carry classes.
 const CLASS_ONLY_ACTIONS = ['Reassign', 'Split'];
 const LINE_ACTIONS = [...BULK_ACTIONS, 'Split', 'Undo'];
@@ -94,31 +99,6 @@ async function saveDueToFrom(db, groupId, qboId, counterpartyEntityId, account, 
        AccountName = EXCLUDED.AccountName, UpdatedBy = EXCLUDED.UpdatedBy, LastUpdated = now()`,
     [groupId, qboId, counterpartyEntityId, account.code, account.name, userId]
   );
-}
-
-// Account history for this file over the months before `month`: each
-// month's latest snapshot, with Paul's latest decision per line.
-async function loadAccountHistoryRows(client, groupId, qboId, month, historyMonths) {
-  const { rows } = await client.query(
-    `WITH snaps AS (
-       SELECT DISTINCT ON (Period) SnapshotId FROM CtrlSnapshots
-       WHERE GroupId = $1 AND QBOId = $2 AND Period >= $3 AND Period < $4
-       ORDER BY Period, PulledAt DESC
-     ),
-     dec AS (
-       SELECT DISTINCT ON (Fingerprint) Fingerprint, Action, TargetAccountCode, TargetAccountName, CounterpartyEntityId
-       FROM CtrlDecisions WHERE GroupId = $1 AND QBOId = $2
-       ORDER BY Fingerprint, DecidedAt DESC
-     )
-     SELECT l.PayeeName, l.AccountCode, l.AccountName,
-            d.Action, d.TargetAccountCode, d.TargetAccountName, d.CounterpartyEntityId, COUNT(*)::int AS n
-     FROM CtrlLedgerLines l
-     JOIN snaps s ON s.SnapshotId = l.SnapshotId
-     LEFT JOIN dec d ON d.Fingerprint = l.Fingerprint
-     GROUP BY l.PayeeName, l.AccountCode, l.AccountName, d.Action, d.TargetAccountCode, d.TargetAccountName, d.CounterpartyEntityId`,
-    [groupId, qboId, `${shiftMonth(month, -historyMonths)}-01`, `${month}-01`]
-  );
-  return rows;
 }
 
 // Class review (the management file): which entity each line belongs to.
@@ -270,7 +250,18 @@ async function handleRun(claims, body) {
     return { runId: run.runid, runDate: run.rundate, reviewKind, statusCounts, lineCount: results.length };
   });
 
-  return json(201, { ...result, qboId, month, snapshotId });
+  // The AI pass runs in the background (ctrlAiWorker). A problem starting
+  // it never fails the review itself.
+  let ai;
+  try {
+    const rules = await loadRules({ query }, groupId);
+    ai = await startReviewAiJob({ groupId, run: { runId: result.runId, qboId }, settings, rules, userId: claims.userId });
+  } catch (err) {
+    console.error('Could not start the AI pass:', err.message);
+    ai = { skipped: 'The AI pass could not be started; start it again from the Review queue' };
+  }
+
+  return json(201, { ...result, qboId, month, snapshotId, ai });
 }
 
 // GET /api/controller/review/runs?groupId=&qboId=&month=
@@ -315,7 +306,9 @@ function parseFilters(src = {}) {
     vendor: src.vendor?.trim() || null,
     entityId: src.entityId || null,
     search: src.search?.trim() || null,
+    ai: src.ai || null,
   };
+  if (f.ai && !AI_FILTERS.includes(f.ai)) throw badRequest(`ai must be one of ${AI_FILTERS.join(', ')}`);
   if (f.statuses.some((s) => !STATUSES.includes(s))) throw badRequest(`status must be among ${STATUSES.join(', ')}`);
   if (!['all', 'open', 'decided'].includes(f.reviewState)) throw badRequest('reviewState must be all, open or decided');
   if (f.accountTypes.some((t) => !ACCOUNT_TYPES.includes(t))) throw badRequest(`accountType must be among ${ACCOUNT_TYPES.join(', ')}`);
@@ -349,6 +342,10 @@ function buildFilterSql(f, start) {
     clauses.push(`(s.SuggestedEntityId = ${x} OR s.CurrentEntityId = ${x} OR d.EntityId = ${x} OR d.CounterpartyEntityId = ${x})`);
   }
   if (f.search) clauses.push(`l.Memo ILIKE ${p(likePattern(f.search))}`);
+  // ai: 'suggested' (the AI proposed something), 'unsure', 'none' (not sent / no answer yet)
+  if (f.ai === 'suggested') clauses.push(`a.SuggestedAction IS NOT NULL AND a.SuggestedAction <> 'Unsure'`);
+  if (f.ai === 'unsure') clauses.push(`a.SuggestedAction = 'Unsure'`);
+  if (f.ai === 'none') clauses.push('a.LineId IS NULL');
   return { sql: clauses.map((c) => ` AND ${c}`).join(''), params };
 }
 
@@ -365,6 +362,7 @@ const QUEUE_FROM = `
     FROM CtrlDecisions WHERE GroupId = $1 AND QBOId = $3
     ORDER BY Fingerprint, DecidedAt DESC
   ) d ON d.Fingerprint = s.Fingerprint AND d.Action <> 'Undo'
+  LEFT JOIN CtrlAiSuggestions a ON a.RunId = s.RunId AND a.LineId = s.LineId
   WHERE s.RunId = $2 AND s.GroupId = $1`;
 
 // GET /api/controller/review/lines?groupId=&runId=&status=&reviewState=
@@ -397,7 +395,10 @@ async function handleLines(groupId, qs) {
             l.ClassName, l.SplitAccount, l.Debit, l.Credit, l.Amount,
             v.DisplayName AS VendorName, v.WatchMode, v.SplitTemplate, ${ACCOUNT_TYPE_SQL} AS AccountType,
             d.Action AS DecisionAction, d.EntityId AS DecisionEntityId, d.Allocations, d.DecidedAt,
-            d.TargetAccountCode, d.TargetAccountName, d.CounterpartyEntityId
+            d.TargetAccountCode, d.TargetAccountName, d.CounterpartyEntityId,
+            a.SuggestedAction AS AiAction, a.SuggestedEntityId AS AiEntityId, a.SuggestedAccountCode AS AiAccountCode,
+            a.SuggestedAccountName AS AiAccountName, a.Confidence AS AiConfidence, a.Reason AS AiReason, a.UsedRule AS AiUsedRule,
+            a.Redacted AS AiRedacted
      ${QUEUE_FROM}${where.sql}
      ORDER BY ${STATUS_ORDER}, ABS(l.Amount) DESC, l.TxnDate, s.LineId
      LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
@@ -453,6 +454,17 @@ async function handleLines(groupId, qs) {
       status: r.status,
       source: r.source,
       reasons: r.reasons,
+      ai: r.aiaction
+        ? {
+            action: r.aiaction,
+            entityId: r.aientityid || null,
+            account: r.aiaccountname ? { code: r.aiaccountcode || null, name: r.aiaccountname } : null,
+            confidence: Number(r.aiconfidence),
+            reason: r.aireason,
+            usedRule: Boolean(r.aiusedrule),
+            redacted: Boolean(r.airedacted),
+          }
+        : null,
       decision: r.decisionaction
         ? {
             action: r.decisionaction,
@@ -510,7 +522,7 @@ async function handleDecisions(claims, body) {
   // The account the line moves to (Reclassify / DueToFrom).
   let target = null;
   let saveMapping = false;
-  const needsDueToFrom = action === 'DueToFrom' || (kind === 'Account' && action === 'Approve');
+  const needsDueToFrom = action === 'DueToFrom' || (kind === 'Account' && (action === 'Approve' || action === 'AcceptAi'));
   const ownerEntityId = needsDueToFrom ? await loadOwnerEntityId(body.groupId, run.qboid) : null;
   // Each other entity's Due To/From account (saved, else found by name).
   const dueToFrom = needsDueToFrom
@@ -535,7 +547,9 @@ async function handleDecisions(claims, body) {
 
   const base = [body.groupId, run.runid, run.qboid];
   const columns = `s.LineId, s.Fingerprint, s.CurrentEntityId, s.SuggestedEntityId, s.SuggestedAction, s.SuggestedAccountCode,
-              s.SuggestedAccountName, l.AccountCode, l.AccountName, l.Amount, v.WatchMode, (d.Fingerprint IS NOT NULL) AS decided`;
+              s.SuggestedAccountName, l.AccountCode, l.AccountName, l.Amount, v.WatchMode, (d.Fingerprint IS NOT NULL) AS decided,
+              a.SuggestedAction AS AiAction, a.SuggestedEntityId AS AiEntityId, a.SuggestedAccountCode AS AiAccountCode,
+              a.SuggestedAccountName AS AiAccountName`;
   let rows;
   if (byFilter) {
     const filters = parseFilters(body.filter);
@@ -574,16 +588,20 @@ async function handleDecisions(claims, body) {
     } else if (action === 'Reclassify' || action === 'DueToFrom') {
       if (lineKey !== target.key) d = { action, target, counterpartyEntityId: action === 'DueToFrom' ? body.counterpartyEntityId : null };
     } else if (kind === 'Account') {
-      const suggested = action === 'Keep' ? 'Keep' : r.suggestedaction;
+      // Approve applies the engine's suggestion, AcceptAi the AI's.
+      const sug = action === 'AcceptAi'
+        ? { action: r.aiaction, entityId: r.aientityid, code: r.aiaccountcode, name: r.aiaccountname }
+        : { action: r.suggestedaction, entityId: r.suggestedentityid, code: r.suggestedaccountcode, name: r.suggestedaccountname };
+      const suggested = action === 'Keep' ? 'Keep' : sug.action;
       if (suggested === 'Keep') {
         d = { action: 'Keep' };
-      } else if (suggested === 'Reclassify' && r.suggestedaccountname) {
-        const key = accountKey(r.suggestedaccountcode || null, r.suggestedaccountname);
+      } else if (suggested === 'Reclassify' && sug.name) {
+        const key = accountKey(sug.code || null, sug.name);
         d = key === lineKey
           ? { action: 'Keep' }
-          : { action: 'Reclassify', target: { key, code: r.suggestedaccountcode || null, name: r.suggestedaccountname } };
-      } else if (suggested === 'DueToFrom' && r.suggestedentityid) {
-        const mapped = dueToFrom.get(r.suggestedentityid);
+          : { action: 'Reclassify', target: { key, code: sug.code || null, name: sug.name } };
+      } else if (suggested === 'DueToFrom' && sug.entityId) {
+        const mapped = dueToFrom.get(sug.entityId);
         if (!mapped) {
           skipped.noDueToFromAccount += 1;
           continue;
@@ -593,9 +611,12 @@ async function handleDecisions(claims, body) {
           : {
               action: 'DueToFrom',
               target: { key: mapped.accountKey, code: mapped.code, name: mapped.name },
-              counterpartyEntityId: r.suggestedentityid,
+              counterpartyEntityId: sug.entityId,
             };
       }
+    } else if (action === 'AcceptAi') {
+      // Class review: the AI's entity, recorded as an approval of it.
+      if (r.aiaction === 'Assign' && r.aientityid && entityIds.has(r.aientityid)) d = { action: 'Approve', entityId: r.aientityid };
     } else {
       const entityId = decisionEntity(action, { currentEntityId: r.currententityid, suggestedEntityId: r.suggestedentityid }, body.entityId);
       if (entityId) d = { action, entityId };
@@ -604,10 +625,11 @@ async function handleDecisions(claims, body) {
       skipped.nothingToApply += 1;
       continue;
     }
+    const suggestionSource = action === 'AcceptAi' ? 'AI' : action === 'Approve' ? 'Engine' : null;
     decisions.push([
       body.groupId, run.qboid, r.fingerprint, r.lineid, run.runid, d.action, d.entityId || null,
       d.allocations ? JSON.stringify(d.allocations) : null, note, claims.userId,
-      d.target ? d.target.code || null : null, d.target ? d.target.name : null, d.counterpartyEntityId || null,
+      d.target ? d.target.code || null : null, d.target ? d.target.name : null, d.counterpartyEntityId || null, suggestionSource,
     ]);
   }
 
@@ -619,7 +641,7 @@ async function handleDecisions(claims, body) {
         'CtrlDecisions',
         [
           'GroupId', 'QBOId', 'Fingerprint', 'LineId', 'RunId', 'Action', 'EntityId', 'Allocations', 'Note', 'DecidedBy',
-          'TargetAccountCode', 'TargetAccountName', 'CounterpartyEntityId',
+          'TargetAccountCode', 'TargetAccountName', 'CounterpartyEntityId', 'SuggestionSource',
         ],
         decisions
       );
@@ -735,16 +757,19 @@ exports.handler = withErrorHandling(async (event) => {
     const settings = validateSettings(body);
     await query(
       `INSERT INTO CtrlReviewSettings (GroupId, Threshold, MediumThreshold, HistoryMonths, UpdatedBy,
-         SplitShiftPoints, SpikePercent, SpikeMinAmount, RecurringMonths, BaselineMonths)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+         SplitShiftPoints, SpikePercent, SpikeMinAmount, RecurringMonths, BaselineMonths,
+         AiEnabled, AiConfidenceCap, AiMonthlyBudget, AiRedactPatientInfo)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
        ON CONFLICT (GroupId) DO UPDATE SET Threshold = EXCLUDED.Threshold, MediumThreshold = EXCLUDED.MediumThreshold,
          HistoryMonths = EXCLUDED.HistoryMonths, UpdatedBy = EXCLUDED.UpdatedBy, LastUpdated = now(),
          SplitShiftPoints = EXCLUDED.SplitShiftPoints, SpikePercent = EXCLUDED.SpikePercent,
          SpikeMinAmount = EXCLUDED.SpikeMinAmount, RecurringMonths = EXCLUDED.RecurringMonths,
-         BaselineMonths = EXCLUDED.BaselineMonths`,
+         BaselineMonths = EXCLUDED.BaselineMonths, AiEnabled = EXCLUDED.AiEnabled, AiConfidenceCap = EXCLUDED.AiConfidenceCap,
+         AiMonthlyBudget = EXCLUDED.AiMonthlyBudget, AiRedactPatientInfo = EXCLUDED.AiRedactPatientInfo`,
       [
         body.groupId, settings.threshold, settings.mediumThreshold, settings.historyMonths, claims.userId,
         settings.splitShiftPoints, settings.spikePercent, settings.spikeMinAmount, settings.recurringMonths, settings.baselineMonths,
+        settings.aiEnabled, settings.aiConfidenceCap, settings.aiMonthlyBudget, settings.aiRedactPatientInfo,
       ]
     );
     await recordAudit({ groupId: body.groupId, userId: claims.userId, action: 'ctrl.review.settings', details: settings });
