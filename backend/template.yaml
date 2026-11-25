@@ -750,11 +750,15 @@ Resources:
         # A review run starts its AI pass (Phase 3).
         - SQSSendMessagePolicy:
             QueueName: !GetAtt CtrlAiQueue.QueueName
+        # "Search All" evidence jobs (Phase 4).
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt CtrlEvidenceQueue.QueueName
       Environment:
         Variables:
           COGNITO_USER_POOL_ID: !Ref ApohcoUserPool
           COGNITO_CLIENT_ID: !Ref ApohcoUserPoolClient
           CTRL_AI_QUEUE_URL: !Ref CtrlAiQueue
+          CTRL_EVIDENCE_QUEUE_URL: !Ref CtrlEvidenceQueue
       Events:
         Settings:
           Type: Api
@@ -792,6 +796,12 @@ Resources:
             RestApiId: !Ref ApohcoDashboardApi
             Path: /api/controller/review/due-to-from
             Method: put
+        EvidenceSearch:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/controller/review/evidence-search
+            Method: post
 
   # --- Controller Phase 3: AI matching (Claude on Amazon Bedrock) ---
   # One message per AI batch ({ batchId }), i.e. one model call. Visibility
@@ -898,6 +908,148 @@ Resources:
             RestApiId: !Ref ApohcoDashboardApi
             Path: /api/controller/ai/jobs/{jobId}
             Method: get
+
+  # --- Controller Phase 4: evidence from Google Workspace (Gmail) ---
+  # Only these three functions can read the Google service account key
+  # (Secrets Manager: apohco-dashboard/google-service-account, stored by
+  # Paul; see SETUP.md section 10). Calls go out through the NAT gateway.
+  CtrlEvidenceDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub apohco-ctrl-evidence-dlq-${Stage}
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+
+  CtrlEvidenceQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub apohco-ctrl-evidence-${Stage}
+      VisibilityTimeout: 1080
+      MessageRetentionPeriod: 86400
+      SqsManagedSseEnabled: true
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt CtrlEvidenceDeadLetterQueue.Arn
+        maxReceiveCount: 3
+
+  CtrlEvidenceWorkerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: ctrlEvidenceWorker
+      Handler: src/functions/controller/ctrlEvidenceWorker/index.handler
+      Timeout: 180
+      MemorySize: 512
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: secretsmanager:GetSecretValue
+              Resource:
+                - !Ref DbCredentialsSecretArn
+                - !Ref AppSecretsArn
+                - !Sub arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:apohco-dashboard/google-service-account-*
+        - VPCAccessPolicy: {}
+      Environment:
+        Variables:
+          GOOGLE_SA_SECRET_ID: apohco-dashboard/google-service-account
+      Events:
+        Queue:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt CtrlEvidenceQueue.Arn
+            BatchSize: 1
+            # Keeps Gmail API use well inside per-user quotas.
+            ScalingConfig:
+              MaximumConcurrency: 2
+
+  CtrlEvidenceFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: ctrlEvidence
+      Handler: src/functions/controller/ctrlEvidence/index.handler
+      MemorySize: 512
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: secretsmanager:GetSecretValue
+              Resource:
+                - !Ref DbCredentialsSecretArn
+                - !Ref AppSecretsArn
+                - !Sub arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:apohco-dashboard/google-service-account-*
+        - VPCAccessPolicy: {}
+      Environment:
+        Variables:
+          COGNITO_USER_POOL_ID: !Ref ApohcoUserPool
+          COGNITO_CLIENT_ID: !Ref ApohcoUserPoolClient
+          GOOGLE_SA_SECRET_ID: apohco-dashboard/google-service-account
+      Events:
+        Line:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/controller/evidence
+            Method: get
+        Find:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/controller/evidence/find
+            Method: post
+        Job:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/controller/evidence/jobs/{jobId}
+            Method: get
+        Preview:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/controller/evidence/{candidateId}/preview
+            Method: get
+
+  CtrlGoogleFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: ctrlGoogle
+      Handler: src/functions/controller/ctrlGoogle/index.handler
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: secretsmanager:GetSecretValue
+              Resource:
+                - !Ref DbCredentialsSecretArn
+                - !Ref AppSecretsArn
+                - !Sub arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:apohco-dashboard/google-service-account-*
+        - VPCAccessPolicy: {}
+      Environment:
+        Variables:
+          COGNITO_USER_POOL_ID: !Ref ApohcoUserPool
+          COGNITO_CLIENT_ID: !Ref ApohcoUserPoolClient
+          GOOGLE_SA_SECRET_ID: apohco-dashboard/google-service-account
+      Events:
+        Settings:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/controller/google
+            Method: any
+        Test:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/controller/google/test
+            Method: post
+        Directory:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/controller/google/directory
+            Method: get
+        Sources:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/controller/google/sources
+            Method: put
 
   # Phase 2b: conflicts queue (rule vs history) and its three resolutions.
   # Database only; no QuickBooks calls.

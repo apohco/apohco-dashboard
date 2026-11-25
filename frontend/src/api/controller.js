@@ -130,3 +130,37 @@ export const startAiJob = (groupId, body) =>
 
 export const getAiJob = (groupId, jobId) =>
   apiClient.get(`/api/controller/ai/jobs/${jobId}`, { params: { groupId } }).then((r) => r.data);
+
+// Google Workspace connection and opted-in sources (Phase 4).
+export const getGoogleSettings = (groupId) =>
+  apiClient.get('/api/controller/google', { params: { groupId } }).then((r) => r.data);
+
+export const saveGoogleSettings = (groupId, adminEmail) =>
+  apiClient.put('/api/controller/google', { groupId, adminEmail }).then((r) => r.data);
+
+export const testGoogleConnection = (groupId) =>
+  apiClient.post('/api/controller/google/test', { groupId }).then((r) => r.data);
+
+export const getGoogleDirectory = (groupId) =>
+  apiClient.get('/api/controller/google/directory', { params: { groupId } }).then((r) => r.data);
+
+// kind: 'Mailbox' | 'UserDrive' | 'SharedDrive'
+export const setGoogleSource = (groupId, { kind, sourceKey, displayName, enabled }) =>
+  apiClient.put('/api/controller/google/sources', { groupId, kind, sourceKey, displayName, enabled }).then((r) => r.data);
+
+// Evidence for review lines (Phase 4).
+export const getLineEvidence = (groupId, runId, lineId) =>
+  apiClient.get('/api/controller/evidence', { params: { groupId, runId, lineId } }).then((r) => r.data);
+
+export const findEvidence = (groupId, runId, lineId) =>
+  apiClient.post('/api/controller/evidence/find', { groupId, runId, lineId }).then((r) => r.data);
+
+export const getEvidencePreview = (groupId, candidateId) =>
+  apiClient.get(`/api/controller/evidence/${candidateId}/preview`, { params: { groupId } }).then((r) => r.data);
+
+// body: { runId, lineIds } | { runId, filter, expectedCount }
+export const startEvidenceSearch = (groupId, body) =>
+  apiClient.post('/api/controller/review/evidence-search', { groupId, ...body }).then((r) => r.data);
+
+export const getEvidenceJob = (groupId, jobId) =>
+  apiClient.get(`/api/controller/evidence/jobs/${jobId}`, { params: { groupId } }).then((r) => r.data);

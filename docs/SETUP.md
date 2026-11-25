@@ -503,6 +503,48 @@ Troubleshooting: a batch that fails 3 times is marked Failed (shown on the AI
 bar) and its message lands in the dead-letter queue. "Run AI pass" / "Ask AI
 about remaining lines" asks again only about lines without an answer.
 
+**Deploying since Phase 3:** use `backend/scripts/deploy-single-package.ps1`
+(PowerShell) instead of `sam build` + `sam deploy`. It builds once into
+`C:\Projects\sb` (avoiding Windows' 260-character path limit), zips the code
+once for every function, and creates the change set without executing it.
+Review the change set, then execute it.
+
+### 9.10 Evidence from Gmail (Phase 4a)
+
+Deploy: `npm run db:migrate` applies `014_controller_evidence.sql` (Google
+settings and opted-in sources; evidence candidates, searches and "Search All"
+jobs). The deploy adds the `apohco-ctrl-evidence-<stage>` queue and its
+dead-letter queue, plus three functions. Only these three can read the Google
+key (`GOOGLE_SA_SECRET_ID`):
+
+- `ctrlGoogle`: `/api/controller/google`, `/test`, `/directory`, `/sources`
+- `ctrlEvidence`: `/api/controller/evidence`, `/find`, `/jobs/{jobId}`,
+  `/{candidateId}/preview`
+- `ctrlEvidenceWorker`: the "Search All" queue worker
+
+It also adds `POST /api/controller/review/evidence-search` to `ctrlReview`.
+Nothing reads mail until section 10 below is done and the connection is set
+up in the dashboard.
+
+- **Controller → Google Workspace**: the admin account (info@apohco.com),
+  **Test connection** (checks the key, the user list, Gmail and shared drives),
+  and the sources that may be searched. **Browse workspace** lists users and
+  shared drives to opt in. Only switched-on sources are searched, and only
+  accounts in the workspace's domain can be added. Gmail is searched now;
+  Drives join with the Drive index (Phase 4b).
+- **Review**: an **Evidence** column. **Find Evidence** searches the opted-in
+  mailboxes for that line right away. **Search All** searches every matching
+  line (or the selected ones) in the background, 300 at most per run, largest
+  amounts first. Each search looks for the amount, then for the vendor's name
+  and aliases, within ±10 days. Candidates are scored on amount, vendor and
+  date, and on whether they name a practice, which is shown as a hint, e.g.
+  "Names Lebanon".
+- **Line detail** (a line's ⋮ menu → *Line detail and evidence*, or click its
+  evidence count): every candidate with what matched, and **Preview**, which
+  fetches the email itself as plain text. Emails are linked, not copied: only
+  the subject, sender, date, a short snippet and attachment names are stored.
+  Every search and preview is written to the audit log.
+
 ## 10. Before Phase 4: Google Workspace (Gmail and Drive evidence)
 
 Phase 4 searches Gmail and Drive for invoices and receipts that support a
@@ -537,11 +579,15 @@ pasted into chat or email.
    client ID from step 2, with exactly these scopes:
 
    ```
-   https://www.googleapis.com/auth/gmail.readonly,https://www.googleapis.com/auth/drive.readonly,https://www.googleapis.com/auth/drive.file
+   https://www.googleapis.com/auth/gmail.readonly,https://www.googleapis.com/auth/drive.readonly,https://www.googleapis.com/auth/drive.file,https://www.googleapis.com/auth/admin.directory.user.readonly
    ```
 
-   Read-only for mail and files. `drive.file` only lets the app write files
-   it creates itself (the evidence folder it makes for saved support).
-5. **Tell me** (no secrets): the mailboxes to search (e.g. your own,
-   accounting@...), and the Drive folders or shared drives that hold
-   invoices. Phase 4 searches only those, and only for lines in review.
+   Read-only for mail, files and the user list. `drive.file` only lets the
+   app write files it creates itself: the **Controller Evidence** folder it
+   makes in the admin account's (info@apohco.com) My Drive.
+   `admin.directory.user.readonly` lets Controller → Google Workspace list
+   the workspace's users so you can opt their mailbox or Drive in.
+5. **Connect** in the dashboard: Controller → **Google Workspace**. Enter the
+   admin account (info@apohco.com), click **Test connection**, then opt in
+   the mailboxes and Drives to search (start with info@apohco.com). Only
+   opted-in sources are ever searched; the list is enforced on the server.

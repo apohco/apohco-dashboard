@@ -19,6 +19,7 @@ const {
 } = require('../../../shared/reviewEngine');
 const { accountKey } = require('../../../shared/accountKey');
 const { startReviewAiJob } = require('../../../shared/ctrlAiJobs');
+const { enqueueEvidenceBatches } = require('../../../shared/ctrlQueue');
 const {
   badRequest,
   isUuid,
@@ -50,6 +51,10 @@ const ACCOUNT_TYPES = ['Asset', 'Liability', 'Equity', 'Revenue', 'Expense', 'Un
 // stands for, marked SuggestionSource 'AI').
 const BULK_ACTIONS = ['Approve', 'AcceptAi', 'Keep', 'Reassign', 'Reclassify', 'DueToFrom'];
 const AI_FILTERS = ['suggested', 'unsure', 'none'];
+const EVIDENCE_FILTERS = ['found', 'none', 'unsearched'];
+// "Search All" (evidence): lines per job and per worker message.
+const EVIDENCE_MAX_LINES = 300;
+const EVIDENCE_BATCH = 10;
 // Entity assignment only makes sense where lines carry classes.
 const CLASS_ONLY_ACTIONS = ['Reassign', 'Split'];
 const LINE_ACTIONS = [...BULK_ACTIONS, 'Split', 'Undo'];
@@ -307,8 +312,10 @@ function parseFilters(src = {}) {
     entityId: src.entityId || null,
     search: src.search?.trim() || null,
     ai: src.ai || null,
+    evidence: src.evidence || null,
   };
   if (f.ai && !AI_FILTERS.includes(f.ai)) throw badRequest(`ai must be one of ${AI_FILTERS.join(', ')}`);
+  if (f.evidence && !EVIDENCE_FILTERS.includes(f.evidence)) throw badRequest(`evidence must be one of ${EVIDENCE_FILTERS.join(', ')}`);
   if (f.statuses.some((s) => !STATUSES.includes(s))) throw badRequest(`status must be among ${STATUSES.join(', ')}`);
   if (!['all', 'open', 'decided'].includes(f.reviewState)) throw badRequest('reviewState must be all, open or decided');
   if (f.accountTypes.some((t) => !ACCOUNT_TYPES.includes(t))) throw badRequest(`accountType must be among ${ACCOUNT_TYPES.join(', ')}`);
@@ -346,6 +353,10 @@ function buildFilterSql(f, start) {
   if (f.ai === 'suggested') clauses.push(`a.SuggestedAction IS NOT NULL AND a.SuggestedAction <> 'Unsure'`);
   if (f.ai === 'unsure') clauses.push(`a.SuggestedAction = 'Unsure'`);
   if (f.ai === 'none') clauses.push('a.LineId IS NULL');
+  // evidence: 'found' (candidates), 'none' (searched, nothing found), 'unsearched'
+  if (f.evidence === 'found') clauses.push('ev.n > 0');
+  if (f.evidence === 'none') clauses.push('es.Fingerprint IS NOT NULL AND ev.n = 0');
+  if (f.evidence === 'unsearched') clauses.push('es.Fingerprint IS NULL');
   return { sql: clauses.map((c) => ` AND ${c}`).join(''), params };
 }
 
@@ -363,6 +374,11 @@ const QUEUE_FROM = `
     ORDER BY Fingerprint, DecidedAt DESC
   ) d ON d.Fingerprint = s.Fingerprint AND d.Action <> 'Undo'
   LEFT JOIN CtrlAiSuggestions a ON a.RunId = s.RunId AND a.LineId = s.LineId
+  LEFT JOIN LATERAL (
+    SELECT COUNT(*)::int AS n, MAX(c.Score) AS best, (ARRAY_AGG(c.EntityHintId ORDER BY c.Score DESC))[1] AS hint
+    FROM CtrlEvidenceCandidates c WHERE c.GroupId = $1 AND c.QBOId = $3 AND c.Fingerprint = s.Fingerprint
+  ) ev ON true
+  LEFT JOIN CtrlEvidenceSearches es ON es.QBOId = $3 AND es.Fingerprint = s.Fingerprint
   WHERE s.RunId = $2 AND s.GroupId = $1`;
 
 // GET /api/controller/review/lines?groupId=&runId=&status=&reviewState=
@@ -398,7 +414,8 @@ async function handleLines(groupId, qs) {
             d.TargetAccountCode, d.TargetAccountName, d.CounterpartyEntityId,
             a.SuggestedAction AS AiAction, a.SuggestedEntityId AS AiEntityId, a.SuggestedAccountCode AS AiAccountCode,
             a.SuggestedAccountName AS AiAccountName, a.Confidence AS AiConfidence, a.Reason AS AiReason, a.UsedRule AS AiUsedRule,
-            a.Redacted AS AiRedacted
+            a.Redacted AS AiRedacted, ev.n AS EvidenceCount, ev.best AS EvidenceBest, ev.hint AS EvidenceHint,
+            es.SearchedAt AS EvidenceSearchedAt
      ${QUEUE_FROM}${where.sql}
      ORDER BY ${STATUS_ORDER}, ABS(l.Amount) DESC, l.TxnDate, s.LineId
      LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
@@ -465,6 +482,12 @@ async function handleLines(groupId, qs) {
             redacted: Boolean(r.airedacted),
           }
         : null,
+      evidence: {
+        count: r.evidencecount || 0,
+        best: r.evidencebest === null || r.evidencebest === undefined ? null : Number(r.evidencebest),
+        entityHintId: r.evidencehint || null,
+        searchedAt: r.evidencesearchedat || null,
+      },
       decision: r.decisionaction
         ? {
             action: r.decisionaction,
@@ -665,6 +688,65 @@ async function handleDecisions(claims, body) {
   return json(200, { decided: decisions.length, skipped });
 }
 
+// POST /api/controller/review/evidence-search
+//   { groupId, runId, lineIds } | { groupId, runId, filter, expectedCount }
+// "Search All": searches the opted-in mailboxes for these lines in the
+// background (ctrlEvidenceWorker), up to EVIDENCE_MAX_LINES, most money first.
+async function handleEvidenceSearch(claims, body) {
+  const run = await loadRun(body.groupId, body.runId);
+  const base = [body.groupId, run.runid, run.qboid];
+  let rows;
+  if (body.filter) {
+    const where = buildFilterSql(parseFilters(body.filter), base.length + 1);
+    ({ rows } = await query(`SELECT s.LineId, ABS(l.Amount) AS amt ${QUEUE_FROM}${where.sql}`, [...base, ...where.params]));
+    if (rows.length !== Number(body.expectedCount)) {
+      throw badRequest(`The filtered lines changed (now ${rows.length}); refresh and try again`, 409);
+    }
+  } else {
+    if (!Array.isArray(body.lineIds) || !body.lineIds.length || !body.lineIds.every(isUuid)) throw badRequest('lineIds (or filter) is required');
+    ({ rows } = await query(`SELECT s.LineId, ABS(l.Amount) AS amt ${QUEUE_FROM} AND s.LineId = ANY($4::uuid[])`, [...base, body.lineIds]));
+  }
+  const { rows: sources } = await query(`SELECT 1 FROM CtrlGoogleSources WHERE GroupId = $1 AND Kind = 'Mailbox' AND Enabled LIMIT 1`, [body.groupId]);
+  if (!sources.length) throw badRequest('No mailbox is opted in yet (Controller → Google Workspace)', 409);
+  if (!rows.length) throw badRequest('No lines to search', 409);
+
+  const lineIds = rows
+    .sort((a, b) => Number(b.amt) - Number(a.amt))
+    .slice(0, EVIDENCE_MAX_LINES)
+    .map((r) => r.lineid);
+  const batches = chunk(lineIds, EVIDENCE_BATCH);
+  const job = await withTransaction(async (client) => {
+    const { rows: j } = await client.query(
+      `INSERT INTO CtrlEvidenceJobs (GroupId, RunId, LineCount, CreatedBy) VALUES ($1, $2, $3, $4) RETURNING JobId`,
+      [body.groupId, run.runid, lineIds.length, claims.userId]
+    );
+    const batchIds = [];
+    for (const ids of batches) {
+      const { rows: b } = await client.query(
+        `INSERT INTO CtrlEvidenceBatches (JobId, GroupId, LineIds) VALUES ($1, $2, $3::uuid[]) RETURNING BatchId`,
+        [j[0].jobid, body.groupId, ids]
+      );
+      batchIds.push(b[0].batchid);
+    }
+    await recordAudit(
+      { groupId: body.groupId, userId: claims.userId, action: 'ctrl.evidence.searchall', targetType: 'CtrlReviewRun', targetId: run.runid, details: { lines: lineIds.length } },
+      client
+    );
+    return { jobId: j[0].jobid, batchIds };
+  });
+  let failed;
+  try {
+    failed = await enqueueEvidenceBatches(job.batchIds);
+  } catch (err) {
+    console.error('Evidence enqueue failed:', err.message);
+    failed = job.batchIds;
+  }
+  if (failed.length) {
+    await query(`UPDATE CtrlEvidenceBatches SET Status = 'Failed', Error = 'Could not be queued', FinishedDate = now() WHERE BatchId = ANY($1::uuid[])`, [failed]);
+  }
+  return json(202, { jobId: job.jobId, lineCount: lineIds.length, skipped: rows.length - lineIds.length, batchCount: job.batchIds.length, failedToQueue: failed.length });
+}
+
 // GET /api/controller/review/accounts?groupId=&qboId=
 // The file's accounts (for Reclassify) and its Due To/From accounts.
 async function handleAccounts(groupId, qs) {
@@ -776,6 +858,7 @@ exports.handler = withErrorHandling(async (event) => {
     return json(200, settings);
   }
   if (httpMethod === 'POST' && resource.endsWith('/decisions')) return handleDecisions(claims, body);
+  if (httpMethod === 'POST' && resource.endsWith('/evidence-search')) return handleEvidenceSearch(claims, body);
   if (httpMethod === 'PUT' && resource.endsWith('/due-to-from')) return handleSaveDueToFrom(claims, body);
   throw badRequest('Unknown review route', 404);
 });

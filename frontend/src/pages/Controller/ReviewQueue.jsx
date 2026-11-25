@@ -40,6 +40,7 @@ import VisibilityOutlinedIcon from '@mui/icons-material/VisibilityOutlined';
 import useControllerGroup from '../../hooks/useControllerGroup';
 import ControllerGroupSelect from '../../components/controller/ControllerGroupSelect';
 import { AiPassStatus, AiSettingsFields, AiSuggestion } from '../../components/controller/AiMatching';
+import { EvidenceCell, EvidenceDrawer, EvidenceJobProgress } from '../../components/controller/Evidence';
 import {
   getControllerOverview,
   getReviewAccounts,
@@ -50,6 +51,8 @@ import {
   saveReviewDecisions,
   saveReviewSettings,
   startReviewRun,
+  findEvidence,
+  startEvidenceSearch,
 } from '../../api/controller';
 import { addMonths, currentMonth, formatMonth, isMonth } from '../../utils/months';
 import { formatCurrency } from '../../utils/format';
@@ -506,8 +509,10 @@ export default function ReviewQueue() {
   const [runsInfo, setRunsInfo] = useState(null);
   const [data, setData] = useState(null);
   const [page, setPage] = useState(0);
-  const [filters, setFilters] = useState({ status: [], reviewState: drill.vendor || drill.account ? 'all' : 'open', accountType: ['Expense'], entityId: '', ai: '' });
+  const [filters, setFilters] = useState({ status: [], reviewState: drill.vendor || drill.account ? 'all' : 'open', accountType: ['Expense'], entityId: '', ai: '', evidence: '' });
   const [aiRefresh, setAiRefresh] = useState(0);
+  const [detailLine, setDetailLine] = useState(null);
+  const [evidenceJobId, setEvidenceJobId] = useState(null);
   const [text, setText] = useState({ account: drill.account, vendor: drill.vendor, search: '' });
   const debouncedText = useDebounced(JSON.stringify(text), DEBOUNCE_MS);
   const [selected, setSelected] = useState(new Set());
@@ -582,6 +587,7 @@ export default function ReviewQueue() {
       ...(filters.accountType.length ? { accountType: filters.accountType.join(',') } : {}),
       ...(filters.entityId ? { entityId: filters.entityId } : {}),
       ...(filters.ai ? { ai: filters.ai } : {}),
+      ...(filters.evidence ? { evidence: filters.evidence } : {}),
       ...(t.account.trim() ? { account: t.account.trim() } : {}),
       ...(t.vendor.trim() ? { vendor: t.vendor.trim() } : {}),
       ...(t.search.trim() ? { search: t.search.trim() } : {}),
@@ -672,6 +678,44 @@ export default function ReviewQueue() {
   const closeMenu = () => setMenu({ anchor: null, line: null });
   const canApprove = (l) => (kind === 'Account' ? Boolean(l.suggestedAction) : Boolean(l.suggestedEntityId || l.currentEntityId));
   const canAcceptAi = (l) => Boolean(l.ai && l.ai.action !== 'Unsure') && !busy;
+
+  // Evidence: "Find Evidence" (one line, right away) and "Search All" (the
+  // selection, or every matching line, in the background).
+  const findOne = async (l) => {
+    setBusy('evidence');
+    setError(null);
+    try {
+      const r = await findEvidence(groupId, run.runId, l.lineId);
+      setNotice(r.candidates.length ? `Found ${r.candidates.length} possible match${r.candidates.length === 1 ? '' : 'es'}.` : 'No evidence found in the opted-in mailboxes.');
+      await loadLines();
+      if (r.candidates.length) setDetailLine(l);
+    } catch (err) {
+      setError(err);
+    } finally {
+      setBusy(null);
+    }
+  };
+  const searchAll = async () => {
+    setError(null);
+    try {
+      const body = selectionCount && !allMatching
+        ? { runId: run.runId, lineIds: [...selected] }
+        : { runId: run.runId, filter: queryParams, expectedCount: data.total };
+      const r = await startEvidenceSearch(groupId, body);
+      setNotice(`Searching ${r.lineCount.toLocaleString()} line${r.lineCount === 1 ? '' : 's'} for evidence${r.skipped ? ` (the ${r.lineCount} largest; ${r.skipped} more can be searched next)` : ''}.`);
+      setEvidenceJobId(r.jobId);
+    } catch (err) {
+      setError(err);
+    }
+  };
+  const onEvidenceDone = useCallback(
+    (job) => {
+      setEvidenceJobId(null);
+      setNotice(`Evidence search finished for ${job.lineCount.toLocaleString()} lines.${job.errors?.length ? ` Some searches failed: ${job.errors[0]}` : ''}`);
+      loadLines();
+    },
+    [loadLines]
+  );
 
   const pageIds = (data?.lines || []).map((l) => l.lineId);
   const allPageSelected = pageIds.length > 0 && pageIds.every((id) => selected.has(id));
@@ -836,7 +880,14 @@ export default function ReviewQueue() {
               <MenuItem value="unsure">AI unsure</MenuItem>
               <MenuItem value="none">Not asked</MenuItem>
             </Select>
+            <Select size="small" displayEmpty value={filters.evidence} onChange={(e) => setFilters((f) => ({ ...f, evidence: e.target.value }))} sx={{ minWidth: 170 }} inputProps={{ 'aria-label': 'Evidence filter' }}>
+              <MenuItem value="">Any evidence</MenuItem>
+              <MenuItem value="found">Evidence found</MenuItem>
+              <MenuItem value="none">Searched, none found</MenuItem>
+              <MenuItem value="unsearched">Not searched</MenuItem>
+            </Select>
           </Box>
+          <EvidenceJobProgress groupId={groupId} jobId={evidenceJobId} onDone={onEvidenceDone} />
 
           <Paper variant="outlined" sx={{ p: 1, mb: 1, display: 'flex', gap: 1, alignItems: 'center', flexWrap: 'wrap' }} data-testid="bulk-bar">
             <Typography variant="body2" sx={{ mx: 1 }}>
@@ -854,6 +905,9 @@ export default function ReviewQueue() {
             </Button>
             <Button size="small" variant="outlined" disabled={!selectionCount || Boolean(busy)} onClick={() => (allMatching ? setConfirmBulk('AcceptAi') : bulk('AcceptAi'))}>
               Accept AI suggestions
+            </Button>
+            <Button size="small" variant="outlined" disabled={Boolean(busy) || Boolean(evidenceJobId) || !data.total} onClick={searchAll}>
+              {selectionCount && !allMatching ? 'Search selected for evidence' : 'Search All'}
             </Button>
             <Button size="small" disabled={!selectionCount || Boolean(busy)} onClick={() => (allMatching ? setConfirmBulk('Keep') : bulk('Keep'))}>
               {keepText(kind)}
@@ -894,6 +948,7 @@ export default function ReviewQueue() {
                   {kind === 'Class' && <TableCell>Class now</TableCell>}
                   <TableCell>Suggested</TableCell>
                   <TableCell>AI</TableCell>
+                  <TableCell>Evidence</TableCell>
                   <TableCell>Status</TableCell>
                   <TableCell>Decision</TableCell>
                   <TableCell />
@@ -940,6 +995,15 @@ export default function ReviewQueue() {
                         onAccept={() => decide({ action: 'AcceptAi', lineIds: [l.lineId] }, ACTION_TEXT.AcceptAi)}
                       />
                     </TableCell>
+                    <TableCell sx={{ whiteSpace: 'nowrap' }}>
+                      <EvidenceCell
+                        evidence={l.evidence}
+                        entityName={entityName}
+                        busy={Boolean(busy)}
+                        onOpen={() => setDetailLine(l)}
+                        onFind={() => findOne(l)}
+                      />
+                    </TableCell>
                     <TableCell>
                       <Tooltip title={<Box component="ul" sx={{ m: 0, pl: 2 }}>{l.reasons.map((r) => <li key={r}>{r}</li>)}</Box>}>
                         <Chip size="small" variant="outlined" color={STATUS_INFO[l.status].color} label={STATUS_INFO[l.status].label} />
@@ -962,7 +1026,7 @@ export default function ReviewQueue() {
                 ))}
                 {data.lines.length === 0 && (
                   <TableRow>
-                    <TableCell colSpan={12} sx={{ color: 'text.secondary' }}>
+                    <TableCell colSpan={13} sx={{ color: 'text.secondary' }}>
                       No lines match these filters.
                     </TableCell>
                   </TableRow>
@@ -994,6 +1058,9 @@ export default function ReviewQueue() {
           </MenuItem>,
           <MenuItem key="due" disabled={!accountsInfo} onClick={() => { setDueDialog({ lineIds: [menu.line.lineId] }); closeMenu(); }}>
             Due To/From…
+          </MenuItem>,
+          <MenuItem key="detail" onClick={() => { setDetailLine(menu.line); closeMenu(); }}>
+            Line detail and evidence
           </MenuItem>,
           <MenuItem key="undo" disabled={!menu.line.decision} onClick={() => { decide({ action: 'Undo', lineIds: [menu.line.lineId] }, 'Undone'); closeMenu(); }}>
             Undo decision
@@ -1053,6 +1120,16 @@ export default function ReviewQueue() {
               loadAccounts();
             }
           }}
+        />
+      )}
+      {run && (
+        <EvidenceDrawer
+          groupId={groupId}
+          runId={run.runId}
+          line={detailLine}
+          entityName={entityName}
+          onClose={() => setDetailLine(null)}
+          onChanged={loadLines}
         />
       )}
       <SplitDialog

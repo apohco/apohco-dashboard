@@ -42,4 +42,10 @@ async function enqueueAiBatches(batchIds, { queueUrl = process.env.CTRL_AI_QUEUE
   return enqueueIds(batchIds, 'batchId', queueUrl, sqs);
 }
 
-module.exports = { enqueueTasks, enqueueAiBatches };
+// One message per evidence "Search All" batch ({ batchId }).
+async function enqueueEvidenceBatches(batchIds, { queueUrl = process.env.CTRL_EVIDENCE_QUEUE_URL, sqs = getClient() } = {}) {
+  if (!queueUrl) throw new Error('CTRL_EVIDENCE_QUEUE_URL is not set');
+  return enqueueIds(batchIds, 'batchId', queueUrl, sqs);
+}
+
+module.exports = { enqueueTasks, enqueueAiBatches, enqueueEvidenceBatches };

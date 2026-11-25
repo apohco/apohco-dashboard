@@ -25,6 +25,7 @@ import RuleOutlinedIcon from '@mui/icons-material/RuleOutlined';
 import StorefrontOutlinedIcon from '@mui/icons-material/StorefrontOutlined';
 import CompareArrowsOutlinedIcon from '@mui/icons-material/CompareArrowsOutlined';
 import InsightsOutlinedIcon from '@mui/icons-material/InsightsOutlined';
+import CloudOutlinedIcon from '@mui/icons-material/CloudOutlined';
 import { useAuth } from '../../context/AuthContext';
 
 export const SIDEBAR_WIDTH = 240;
@@ -45,6 +46,7 @@ const controllerItems = [
   { label: 'Vendors', path: '/controller/vendors', icon: <StorefrontOutlinedIcon fontSize="small" /> },
   { label: 'Trends', path: '/controller/trends', icon: <InsightsOutlinedIcon fontSize="small" /> },
   { label: 'Entities', path: '/controller/entities', icon: <ApartmentOutlinedIcon fontSize="small" /> },
+  { label: 'Google Workspace', path: '/controller/google', icon: <CloudOutlinedIcon fontSize="small" /> },
 ];
 
 function NavSection({ label, icon, items, open, onToggle }) {
