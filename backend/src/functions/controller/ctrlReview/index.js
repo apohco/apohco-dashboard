@@ -51,7 +51,7 @@ const ACCOUNT_TYPES = ['Asset', 'Liability', 'Equity', 'Revenue', 'Expense', 'Un
 // stands for, marked SuggestionSource 'AI').
 const BULK_ACTIONS = ['Approve', 'AcceptAi', 'Keep', 'Reassign', 'Reclassify', 'DueToFrom'];
 const AI_FILTERS = ['suggested', 'unsure', 'none'];
-const EVIDENCE_FILTERS = ['found', 'none', 'unsearched'];
+const EVIDENCE_FILTERS = ['found', 'none', 'unsearched', 'saved'];
 // "Search All" (evidence): lines per job and per worker message.
 const EVIDENCE_MAX_LINES = 300;
 const EVIDENCE_BATCH = 10;
@@ -357,6 +357,7 @@ function buildFilterSql(f, start) {
   if (f.evidence === 'found') clauses.push('ev.n > 0');
   if (f.evidence === 'none') clauses.push('es.Fingerprint IS NOT NULL AND ev.n = 0');
   if (f.evidence === 'unsearched') clauses.push('es.Fingerprint IS NULL');
+  if (f.evidence === 'saved') clauses.push('sv.saved > 0');
   return { sql: clauses.map((c) => ` AND ${c}`).join(''), params };
 }
 
@@ -379,6 +380,9 @@ const QUEUE_FROM = `
     FROM CtrlEvidenceCandidates c WHERE c.GroupId = $1 AND c.QBOId = $3 AND c.Fingerprint = s.Fingerprint
   ) ev ON true
   LEFT JOIN CtrlEvidenceSearches es ON es.QBOId = $3 AND es.Fingerprint = s.Fingerprint
+  LEFT JOIN LATERAL (
+    SELECT COUNT(*) FILTER (WHERE x.Status = 'Saved')::int AS saved FROM CtrlEvidenceSaved x WHERE x.QBOId = $3 AND x.Fingerprint = s.Fingerprint
+  ) sv ON true
   WHERE s.RunId = $2 AND s.GroupId = $1`;
 
 // GET /api/controller/review/lines?groupId=&runId=&status=&reviewState=
@@ -415,7 +419,7 @@ async function handleLines(groupId, qs) {
             a.SuggestedAction AS AiAction, a.SuggestedEntityId AS AiEntityId, a.SuggestedAccountCode AS AiAccountCode,
             a.SuggestedAccountName AS AiAccountName, a.Confidence AS AiConfidence, a.Reason AS AiReason, a.UsedRule AS AiUsedRule,
             a.Redacted AS AiRedacted, ev.n AS EvidenceCount, ev.best AS EvidenceBest, ev.hint AS EvidenceHint,
-            es.SearchedAt AS EvidenceSearchedAt
+            es.SearchedAt AS EvidenceSearchedAt, sv.saved AS EvidenceSaved
      ${QUEUE_FROM}${where.sql}
      ORDER BY ${STATUS_ORDER}, ABS(l.Amount) DESC, l.TxnDate, s.LineId
      LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
@@ -487,6 +491,7 @@ async function handleLines(groupId, qs) {
         best: r.evidencebest === null || r.evidencebest === undefined ? null : Number(r.evidencebest),
         entityHintId: r.evidencehint || null,
         searchedAt: r.evidencesearchedat || null,
+        saved: r.evidencesaved || 0,
       },
       decision: r.decisionaction
         ? {
@@ -706,8 +711,8 @@ async function handleEvidenceSearch(claims, body) {
     if (!Array.isArray(body.lineIds) || !body.lineIds.length || !body.lineIds.every(isUuid)) throw badRequest('lineIds (or filter) is required');
     ({ rows } = await query(`SELECT s.LineId, ABS(l.Amount) AS amt ${QUEUE_FROM} AND s.LineId = ANY($4::uuid[])`, [...base, body.lineIds]));
   }
-  const { rows: sources } = await query(`SELECT 1 FROM CtrlGoogleSources WHERE GroupId = $1 AND Kind = 'Mailbox' AND Enabled LIMIT 1`, [body.groupId]);
-  if (!sources.length) throw badRequest('No mailbox is opted in yet (Controller → Google Workspace)', 409);
+  const { rows: sources } = await query(`SELECT 1 FROM CtrlGoogleSources WHERE GroupId = $1 AND Kind IN ('Mailbox', 'Folder') AND Enabled LIMIT 1`, [body.groupId]);
+  if (!sources.length) throw badRequest('No mailbox or invoice folder is switched on yet (Controller → Google Workspace)', 409);
   if (!rows.length) throw badRequest('No lines to search', 409);
 
   const lineIds = rows

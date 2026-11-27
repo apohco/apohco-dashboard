@@ -545,6 +545,46 @@ up in the dashboard.
   the subject, sender, date, a short snippet and attachment names are stored.
   Every search and preview is written to the audit log.
 
+### 9.11 Invoice folders and Save as support (Phase 4b)
+
+Deploy: `npm run db:migrate` applies `015_controller_drive_evidence.sql`:
+folder sources, the folder index (`CtrlDriveFiles`, full-text search), index
+runs, saved support (`CtrlEvidenceSaved`), learned vendor senders, and the
+admin's evidence folders. The deploy adds:
+
+- `apohco-ctrl-evidence-<stage>-<account>`: the private evidence bucket.
+  Encrypted, versioned, TLS only, never public, no expiry, and kept even if
+  the stack is deleted.
+- `ctrlDriveIndexWorker`: lists and reads only the invoice folders. It uses
+  Textract for scans and photos, and runs nightly at 07:30 UTC.
+- The `apohco-ctrl-drive-index-<stage>` queue and its dead-letter queue.
+- New routes: `/api/controller/google/folders` and
+  `/folders/{sourceId}[/index]`; `/api/controller/evidence/{candidateId}/confirm`
+  and `/evidence/saved/{savedId}/download`.
+
+- **Controller → Google Workspace → Invoice folders**: paste a Drive folder
+  link, as many as you like. Subfolders are included. Drive is never searched
+  outside these folders. Each folder must be shared with the admin account or
+  sit in a shared drive it belongs to; otherwise enter the account that owns
+  it. Each folder shows its index status and can be switched off, indexed
+  now, or removed. Removing a folder deletes its index; saved support is kept.
+- **What's indexed**: PDFs (their text, or OCR of the first 3 pages if it's a
+  scan), Google Docs, JPEG/PNG/TIFF (OCR), and text files. Files over 25 MB,
+  and other types, are kept by name only. Only changed files are re-read
+  each night.
+- **Find Evidence / Search All** also look up the folder index: files with
+  the amount or naming the vendor, dated by the invoice's own date when it
+  has one.
+- **Save as support** (Line detail): an email becomes a PDF, with its PDF
+  attachments' pages and its photos added; a Drive file is saved as it is
+  (a Google Doc as PDF). It's stored in the evidence bucket and filed in the
+  admin's My Drive as `Controller Evidence / <practice> / <YYYY-MM> /
+  <date>_<vendor>_<amount>.pdf`. **Download** gives a 5-minute link. A
+  confirmed email's sender is remembered for the vendor. The Review filter
+  **Supported (saved)** lists supported lines.
+- Cost: Textract is about $1.50 per 1,000 scanned pages. Text PDFs and Docs
+  cost nothing to read.
+
 ## 10. Before Phase 4: Google Workspace (Gmail and Drive evidence)
 
 Phase 4 searches Gmail and Drive for invoices and receipts that support a

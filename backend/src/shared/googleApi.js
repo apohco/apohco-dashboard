@@ -21,6 +21,7 @@ const SCOPES = {
   directory: 'https://www.googleapis.com/auth/admin.directory.user.readonly',
 };
 const TIMEOUT_MS = 15000;
+const MAX_DOWNLOAD_BYTES = 25 * 1024 * 1024;
 const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 
 const tokenCache = new Map();
@@ -113,16 +114,158 @@ function queryString(params = {}) {
   return s ? `?${s}` : '';
 }
 
-async function get(url, subject, scopeNames, params, { http = axios } = {}) {
+// A binary error body (arraybuffer) as JSON, so describeGoogleError can read it.
+function decodeErrorBody(err) {
+  const d = err?.response?.data;
+  if (d && (Buffer.isBuffer(d) || d instanceof ArrayBuffer)) {
+    try {
+      err.response.data = JSON.parse(Buffer.from(d).toString('utf8'));
+    } catch {
+      err.response.data = null;
+    }
+  }
+  return err;
+}
+
+async function get(url, subject, scopeNames, params, { http = axios, binary = false, timeout = TIMEOUT_MS } = {}) {
   const token = await getAccessToken(subject, scopeNames, { http });
   try {
-    const { data } = await http.get(`${url}${queryString(params)}`, { headers: { Authorization: `Bearer ${token}` }, timeout: TIMEOUT_MS });
+    const { data } = await http.get(`${url}${queryString(params)}`, {
+      headers: { Authorization: `Bearer ${token}` },
+      timeout,
+      ...(binary ? { responseType: 'arraybuffer', maxContentLength: MAX_DOWNLOAD_BYTES } : {}),
+    });
+    return binary ? Buffer.from(data) : data;
+  } catch (err) {
+    const e = new Error(describeGoogleError(decodeErrorBody(err)));
+    e.status = err?.response?.status;
+    throw e;
+  }
+}
+
+async function send(method, url, subject, scopeNames, body, { http = axios, headers = {}, params } = {}) {
+  const token = await getAccessToken(subject, scopeNames, { http });
+  try {
+    const { data } = await http.request({
+      method,
+      url: `${url}${queryString(params)}`,
+      data: body,
+      headers: { Authorization: `Bearer ${token}`, ...headers },
+      timeout: 60000,
+      maxBodyLength: MAX_DOWNLOAD_BYTES,
+    });
     return data;
   } catch (err) {
     const e = new Error(describeGoogleError(err));
     e.status = err?.response?.status;
     throw e;
   }
+}
+
+// ---- Drive (read-only inside opted-in folders; drive.file for the
+// admin's own evidence folder)
+
+const DRIVE = 'https://www.googleapis.com/drive/v3';
+const FILE_FIELDS = 'id,name,mimeType,modifiedTime,size,owners(emailAddress),webViewLink,parents,driveId,trashed';
+const FOLDER_MIME = 'application/vnd.google-apps.folder';
+
+async function driveGetFile(actAs, fileId, { http, fields = FILE_FIELDS } = {}) {
+  return get(`${DRIVE}/files/${encodeURIComponent(fileId)}`, actAs, ['driveRead'], { fields, supportsAllDrives: true }, { http });
+}
+
+// The direct children of a folder (files and subfolders), all pages.
+async function driveListChildren(actAs, folderId, { http } = {}) {
+  const files = [];
+  let pageToken;
+  do {
+    const data = await get(
+      `${DRIVE}/files`,
+      actAs,
+      ['driveRead'],
+      {
+        q: `'${String(folderId).replace(/'/g, '')}' in parents and trashed=false`,
+        fields: `nextPageToken,files(${FILE_FIELDS})`,
+        pageSize: 1000,
+        supportsAllDrives: true,
+        includeItemsFromAllDrives: true,
+        ...(pageToken ? { pageToken } : {}),
+      },
+      { http }
+    );
+    files.push(...(data.files || []));
+    pageToken = data.nextPageToken;
+  } while (pageToken && files.length < 20000);
+  return files;
+}
+
+// Every file under a folder (subfolders included), with each file's path
+// below the folder. Stops at maxFiles / maxFolders.
+async function driveWalkFolder(actAs, folderId, { http, maxFiles = 20000, maxFolders = 2000 } = {}) {
+  const files = [];
+  const queue = [{ id: folderId, path: '' }];
+  const seen = new Set();
+  let truncated = false;
+  while (queue.length) {
+    const { id, path } = queue.shift();
+    if (seen.has(id)) continue;
+    seen.add(id);
+    if (seen.size > maxFolders) {
+      truncated = true;
+      break;
+    }
+    for (const f of await driveListChildren(actAs, id, { http })) {
+      if (f.mimeType === FOLDER_MIME) queue.push({ id: f.id, path: path ? `${path} / ${f.name}` : f.name });
+      else if (files.length < maxFiles) files.push({ ...f, path });
+      else truncated = true;
+    }
+  }
+  return { files, folders: seen.size, truncated };
+}
+
+async function driveDownload(actAs, fileId, { http } = {}) {
+  return get(`${DRIVE}/files/${encodeURIComponent(fileId)}`, actAs, ['driveRead'], { alt: 'media', supportsAllDrives: true }, { http, binary: true, timeout: 60000 });
+}
+
+// A Google Doc / Sheet exported (e.g. text/plain or application/pdf).
+async function driveExport(actAs, fileId, mimeType, { http } = {}) {
+  return get(`${DRIVE}/files/${encodeURIComponent(fileId)}/export`, actAs, ['driveRead'], { mimeType }, { http, binary: true, timeout: 60000 });
+}
+
+// The admin's evidence folders: created by the app (drive.file), found by
+// id afterwards (the caller stores the ids).
+async function driveCreateFolder(adminEmail, name, parentId, { http } = {}) {
+  return send('POST', `${DRIVE}/files`, adminEmail, ['driveFile'], { name, mimeType: FOLDER_MIME, ...(parentId ? { parents: [parentId] } : {}) }, {
+    http,
+    params: { fields: 'id,name,webViewLink' },
+  });
+}
+
+// Uploads a file (multipart) into a folder the app created.
+async function driveUpload(adminEmail, { name, parentId, mimeType, data }, { http } = {}) {
+  const boundary = `ctrl${crypto.randomBytes(12).toString('hex')}`;
+  const meta = JSON.stringify({ name, parents: [parentId] });
+  const body = Buffer.concat([
+    Buffer.from(`--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${meta}\r\n--${boundary}\r\nContent-Type: ${mimeType}\r\n\r\n`),
+    data,
+    Buffer.from(`\r\n--${boundary}--`),
+  ]);
+  return send('POST', 'https://www.googleapis.com/upload/drive/v3/files', adminEmail, ['driveFile'], body, {
+    http,
+    headers: { 'Content-Type': `multipart/related; boundary=${boundary}` },
+    params: { uploadType: 'multipart', fields: 'id,name,webViewLink' },
+  });
+}
+
+// A Gmail attachment's bytes.
+async function gmailGetAttachment(mailbox, messageId, attachmentId, { http } = {}) {
+  const data = await get(
+    `https://gmail.googleapis.com/gmail/v1/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(messageId)}/attachments/${encodeURIComponent(attachmentId)}`,
+    mailbox,
+    ['gmail'],
+    {},
+    { http, timeout: 60000 }
+  );
+  return Buffer.from(data.data || '', 'base64url');
 }
 
 // ---- Gmail (read-only)
@@ -221,5 +364,14 @@ module.exports = {
   listSharedDrives,
   testConnection,
   resetCaches,
+  FOLDER_MIME,
+  driveGetFile,
+  driveListChildren,
+  driveWalkFolder,
+  driveDownload,
+  driveExport,
+  driveCreateFolder,
+  driveUpload,
+  gmailGetAttachment,
   queryString,
 };

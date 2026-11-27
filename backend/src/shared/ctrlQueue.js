@@ -48,4 +48,33 @@ async function enqueueEvidenceBatches(batchIds, { queueUrl = process.env.CTRL_EV
   return enqueueIds(batchIds, 'batchId', queueUrl, sqs);
 }
 
-module.exports = { enqueueTasks, enqueueAiBatches, enqueueEvidenceBatches };
+// Arbitrary JSON messages, 10 per call. Returns the indexes SQS refused.
+async function enqueueBodies(bodies, queueUrl, sqs = getClient()) {
+  const failed = [];
+  for (const [n, batch] of chunk(bodies.map((b, i) => [i, b]), 10).entries()) {
+    try {
+      const result = await sqs.send(
+        new SendMessageBatchCommand({ QueueUrl: queueUrl, Entries: batch.map(([i, b]) => ({ Id: String(i), MessageBody: JSON.stringify(b) })) })
+      );
+      for (const f of result.Failed || []) failed.push(Number(f.Id));
+    } catch (err) {
+      console.error('SendMessageBatch failed:', err.name, err.message, 'batch', n);
+      failed.push(...batch.map(([i]) => i));
+    }
+  }
+  return failed;
+}
+
+// Drive index messages: { type: 'scan', indexRunId } | { type: 'files', indexRunId, files }.
+async function enqueueDriveIndex(bodies, { queueUrl = process.env.CTRL_DRIVE_INDEX_QUEUE_URL, sqs = getClient() } = {}) {
+  if (!queueUrl) throw new Error('CTRL_DRIVE_INDEX_QUEUE_URL is not set');
+  return enqueueBodies(bodies, queueUrl, sqs);
+}
+
+// Save-as-support messages ({ saveId }) go to the evidence queue.
+async function enqueueEvidenceSave(saveId, { queueUrl = process.env.CTRL_EVIDENCE_QUEUE_URL, sqs = getClient() } = {}) {
+  if (!queueUrl) throw new Error('CTRL_EVIDENCE_QUEUE_URL is not set');
+  return enqueueBodies([{ saveId }], queueUrl, sqs);
+}
+
+module.exports = { enqueueTasks, enqueueAiBatches, enqueueEvidenceBatches, enqueueBodies, enqueueDriveIndex, enqueueEvidenceSave };

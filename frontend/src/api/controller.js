@@ -148,6 +148,24 @@ export const getGoogleDirectory = (groupId) =>
 export const setGoogleSource = (groupId, { kind, sourceKey, displayName, enabled }) =>
   apiClient.put('/api/controller/google/sources', { groupId, kind, sourceKey, displayName, enabled }).then((r) => r.data);
 
+// Invoice folders (Phase 4b): only these are indexed in Drive.
+// actAs: the workspace account that can read the folder (default: the admin).
+export const addGoogleFolder = (groupId, link, actAs) =>
+  apiClient.post('/api/controller/google/folders', { groupId, link, ...(actAs ? { actAs } : {}) }).then((r) => r.data);
+
+export const indexGoogleFolder = (groupId, sourceId) =>
+  apiClient.post(`/api/controller/google/folders/${sourceId}/index`, { groupId }).then((r) => r.data);
+
+export const removeGoogleFolder = (groupId, sourceId) =>
+  apiClient.delete(`/api/controller/google/folders/${sourceId}`, { params: { groupId } }).then((r) => r.data);
+
+// Save as support (Phase 4b).
+export const confirmEvidence = (groupId, runId, lineId, candidateId) =>
+  apiClient.post(`/api/controller/evidence/${candidateId}/confirm`, { groupId, runId, lineId }).then((r) => r.data);
+
+export const getSavedEvidenceDownload = (groupId, savedId) =>
+  apiClient.get(`/api/controller/evidence/saved/${savedId}/download`, { params: { groupId } }).then((r) => r.data);
+
 // Evidence for review lines (Phase 4).
 export const getLineEvidence = (groupId, runId, lineId) =>
   apiClient.get('/api/controller/evidence', { params: { groupId, runId, lineId } }).then((r) => r.data);

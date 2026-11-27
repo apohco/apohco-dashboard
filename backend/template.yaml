@@ -931,6 +931,108 @@ Resources:
         deadLetterTargetArn: !GetAtt CtrlEvidenceDeadLetterQueue.Arn
         maxReceiveCount: 3
 
+  # --- Phase 4b: invoice-folder index and saved support ---
+  # Saved support: private, encrypted, versioned, TLS only, never expires,
+  # never public. Read only through 5-minute signed links.
+  EvidenceBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub apohco-ctrl-evidence-${Stage}-${AWS::AccountId}
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+
+  EvidenceBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref EvidenceBucket
+      PolicyDocument:
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt EvidenceBucket.Arn
+              - !Sub ${EvidenceBucket.Arn}/*
+            Condition:
+              Bool:
+                aws:SecureTransport: false
+
+  # One message per folder pass step: { type: 'scan' } or { type: 'files' }.
+  CtrlDriveIndexDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub apohco-ctrl-drive-index-dlq-${Stage}
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+
+  CtrlDriveIndexQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub apohco-ctrl-drive-index-${Stage}
+      VisibilityTimeout: 1800
+      MessageRetentionPeriod: 86400
+      SqsManagedSseEnabled: true
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt CtrlDriveIndexDeadLetterQueue.Arn
+        maxReceiveCount: 3
+
+  # Lists and reads only the invoice folders Paul added; OCR through
+  # Textract; never writes to Google or QuickBooks.
+  CtrlDriveIndexWorkerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: ctrlDriveIndexWorker
+      Handler: src/functions/controller/ctrlDriveIndexWorker/index.handler
+      Timeout: 300
+      MemorySize: 1024
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: secretsmanager:GetSecretValue
+              Resource:
+                - !Ref DbCredentialsSecretArn
+                - !Ref AppSecretsArn
+                - !Sub arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:apohco-dashboard/google-service-account-*
+            - Effect: Allow
+              Action: textract:DetectDocumentText
+              Resource: '*'
+        - VPCAccessPolicy: {}
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt CtrlDriveIndexQueue.QueueName
+      Environment:
+        Variables:
+          GOOGLE_SA_SECRET_ID: apohco-dashboard/google-service-account
+          CTRL_DRIVE_INDEX_QUEUE_URL: !Ref CtrlDriveIndexQueue
+      Events:
+        Queue:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt CtrlDriveIndexQueue.Arn
+            BatchSize: 1
+            ScalingConfig:
+              MaximumConcurrency: 3
+        Nightly:
+          Type: Schedule
+          Properties:
+            # 07:30 UTC = 2:30 / 3:30 AM Eastern.
+            Schedule: cron(30 7 * * ? *)
+            Description: Re-index the Controller's invoice folders nightly
+
   CtrlEvidenceWorkerFunction:
     Type: AWS::Serverless::Function
     Properties:
@@ -946,10 +1048,15 @@ Resources:
                 - !Ref DbCredentialsSecretArn
                 - !Ref AppSecretsArn
                 - !Sub arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:apohco-dashboard/google-service-account-*
+            # Save as support (Phase 4b): writes confirmed evidence only.
+            - Effect: Allow
+              Action: s3:PutObject
+              Resource: !Sub ${EvidenceBucket.Arn}/*
         - VPCAccessPolicy: {}
       Environment:
         Variables:
           GOOGLE_SA_SECRET_ID: apohco-dashboard/google-service-account
+          EVIDENCE_BUCKET: !Ref EvidenceBucket
       Events:
         Queue:
           Type: SQS
@@ -974,13 +1081,33 @@ Resources:
                 - !Ref DbCredentialsSecretArn
                 - !Ref AppSecretsArn
                 - !Sub arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:apohco-dashboard/google-service-account-*
+            # Download links (signed, 5 minutes) for saved support.
+            - Effect: Allow
+              Action: s3:GetObject
+              Resource: !Sub ${EvidenceBucket.Arn}/*
         - VPCAccessPolicy: {}
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt CtrlEvidenceQueue.QueueName
       Environment:
         Variables:
           COGNITO_USER_POOL_ID: !Ref ApohcoUserPool
           COGNITO_CLIENT_ID: !Ref ApohcoUserPoolClient
           GOOGLE_SA_SECRET_ID: apohco-dashboard/google-service-account
+          EVIDENCE_BUCKET: !Ref EvidenceBucket
+          CTRL_EVIDENCE_QUEUE_URL: !Ref CtrlEvidenceQueue
       Events:
+        Confirm:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/controller/evidence/{candidateId}/confirm
+            Method: post
+        Download:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/controller/evidence/saved/{savedId}/download
+            Method: get
         Line:
           Type: Api
           Properties:
@@ -1020,12 +1147,34 @@ Resources:
                 - !Ref AppSecretsArn
                 - !Sub arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:apohco-dashboard/google-service-account-*
         - VPCAccessPolicy: {}
+        # Adding a folder / "Index now" starts an indexing pass.
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt CtrlDriveIndexQueue.QueueName
       Environment:
         Variables:
           COGNITO_USER_POOL_ID: !Ref ApohcoUserPool
           COGNITO_CLIENT_ID: !Ref ApohcoUserPoolClient
           GOOGLE_SA_SECRET_ID: apohco-dashboard/google-service-account
+          CTRL_DRIVE_INDEX_QUEUE_URL: !Ref CtrlDriveIndexQueue
       Events:
+        Folders:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/controller/google/folders
+            Method: post
+        Folder:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/controller/google/folders/{sourceId}
+            Method: delete
+        FolderIndex:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/controller/google/folders/{sourceId}/index
+            Method: post
         Settings:
           Type: Api
           Properties:

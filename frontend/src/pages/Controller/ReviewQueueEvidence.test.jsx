@@ -1,5 +1,5 @@
 // Phase 4a: evidence in the Review queue.
-import { test, expect, vi, beforeEach } from 'vitest';
+import { describe, test, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
@@ -18,6 +18,8 @@ vi.mock('../../api/controller', () => ({
   getEvidenceJob: vi.fn(),
   getLineEvidence: vi.fn(),
   getEvidencePreview: vi.fn(),
+  confirmEvidence: vi.fn(),
+  getSavedEvidenceDownload: vi.fn(),
 }));
 vi.mock('../../api/settings', () => ({ listGroups: vi.fn() }));
 
@@ -32,6 +34,8 @@ import {
   getEvidenceJob,
   getLineEvidence,
   getEvidencePreview,
+  confirmEvidence,
+  getSavedEvidenceDownload,
 } from '../../api/controller';
 import { listGroups } from '../../api/settings';
 import ReviewQueue from './ReviewQueue';
@@ -89,7 +93,7 @@ test('Find Evidence on one line, then the line detail shows the match; preview o
   expect(within(detail).getByText('Names Lebanon ("Main St")')).toBeInTheDocument();
   expect(within(detail).getByText('100%')).toBeInTheDocument();
   await user.click(within(detail).getByRole('button', { name: 'Preview' }));
-  const preview = await screen.findByTestId('email-preview');
+  const preview = await screen.findByTestId('evidence-preview');
   expect(within(preview).getByText(/Total \$1,250\.00/)).toBeInTheDocument();
   expect(getEvidencePreview).toHaveBeenCalledWith('g1', 'c1');
 });
@@ -130,4 +134,54 @@ test('the evidence filter', async () => {
   await user.click(screen.getByRole('combobox', { name: 'Evidence filter' }));
   await user.click(screen.getByRole('option', { name: 'Not searched' }));
   await waitFor(() => expect(listReviewLines).toHaveBeenLastCalledWith('g1', expect.objectContaining({ evidence: 'unsearched' })));
+});
+
+describe('Phase 4b: invoice folders and Save as support', () => {
+  const DRIVE = {
+    ...CANDIDATE, candidateId: 'd1', source: 'Drive', account: 'src-1', title: 'Minuteman INV-4471.pdf', sender: 'amy@apohco.com',
+    link: 'https://drive.google.com/file/d/x/view', path: 'Invoices / 2026', attachmentNames: [], saved: null,
+  };
+
+  test('a Drive match shows its folder and an Open in Drive link; Save as support saves it, then it can be downloaded', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    const open = vi.spyOn(window, 'open').mockImplementation(() => null);
+    listReviewLines.mockResolvedValue(response([line({ evidence: { count: 1, best: 1, entityHintId: null, searchedAt: 'x', saved: 0 } })]));
+    getLineEvidence
+      .mockResolvedValueOnce({ candidates: [DRIVE], saved: [], lastSearch: { at: '2026-11-27T10:00:00Z', sources: 2, found: 1 } })
+      .mockResolvedValueOnce({ candidates: [{ ...DRIVE, saved: { savedId: 's1', status: 'Saving' } }], saved: [{ savedId: 's1', status: 'Saving', title: DRIVE.title }], lastSearch: null })
+      .mockResolvedValue({
+        candidates: [{ ...DRIVE, saved: { savedId: 's1', status: 'Saved' } }],
+        saved: [{ savedId: 's1', status: 'Saved', fileName: '2026-10-03_Minuteman_1250.00.pdf', drivePath: 'Controller Evidence / Lebanon / 2026-10 / 2026-10-03_Minuteman_1250.00.pdf', error: null }],
+        lastSearch: null,
+      });
+    confirmEvidence.mockResolvedValue({ savedId: 's1', status: 'Saving' });
+    getSavedEvidenceDownload.mockResolvedValue({ url: 'https://s3/signed', fileName: 'x.pdf', expiresInSeconds: 300 });
+    render(<ReviewQueue />, { wrapper: MemoryRouter });
+    await user.click(await screen.findByText('1 found · best 100%'));
+    const detail = await screen.findByTestId('line-detail');
+    expect(await within(detail).findByText('Minuteman INV-4471.pdf')).toBeInTheDocument();
+    expect(within(detail).getByText('Drive file')).toBeInTheDocument();
+    expect(within(detail).getByRole('link', { name: 'Open in Drive' })).toHaveAttribute('href', DRIVE.link);
+
+    await user.click(within(detail).getByRole('button', { name: 'Save as support' }));
+    expect(confirmEvidence).toHaveBeenCalledWith('g1', 'run-1', 'l1', 'd1');
+    expect(await within(detail).findByText('Saving…', { selector: 'span' })).toBeInTheDocument();
+    await vi.advanceTimersByTimeAsync(4100);
+    const saved = await within(detail).findByTestId('saved-support');
+    expect(await within(saved).findByText('Filed in Drive: Controller Evidence / Lebanon / 2026-10 / 2026-10-03_Minuteman_1250.00.pdf')).toBeInTheDocument();
+    expect(within(detail).getByText('Saved as support')).toBeInTheDocument();
+    await user.click(within(saved).getByRole('button', { name: 'Download' }));
+    expect(getSavedEvidenceDownload).toHaveBeenCalledWith('g1', 's1');
+    await waitFor(() => expect(open).toHaveBeenCalledWith('https://s3/signed', '_blank', 'noopener'));
+    open.mockRestore();
+    vi.useRealTimers();
+  }, 15000);
+
+  test('a supported line is marked in the queue', async () => {
+    listReviewLines.mockResolvedValue(response([line({ evidence: { count: 0, best: null, entityHintId: null, searchedAt: 'x', saved: 1 } })]));
+    render(<ReviewQueue />, { wrapper: MemoryRouter });
+    expect(await screen.findByText('Supported')).toBeInTheDocument();
+    expect(screen.getByText('View support')).toBeInTheDocument();
+  });
 });

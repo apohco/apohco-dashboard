@@ -1,8 +1,13 @@
-// Controller Phase 4a: "Search All" worker. One SQS message ({ batchId })
-// searches the opted-in mailboxes for up to 10 review lines. Read-only to
-// Google; never touches QuickBooks.
+// Controller Phase 4: evidence worker.
+//   { batchId }  "Search All": searches the opted-in mailboxes and invoice
+//                folders for up to 10 review lines (read-only)
+//   { saveId }   "Save as support" (Phase 4b): stores confirmed evidence in
+//                the evidence bucket; the only Google write is the copy in
+//                the admin's own Controller Evidence folder
+// Never touches QuickBooks.
 const { query } = require('../../../shared/db');
 const { searchLines } = require('../../../shared/ctrlEvidence');
+const { processSave } = require('../../../shared/evidenceSave');
 
 // Must match maxReceiveCount on the queue's redrive policy (template.yaml).
 const MAX_ATTEMPTS = 3;
@@ -47,17 +52,16 @@ async function processBatch(batchId) {
 exports.handler = async (event) => {
   const results = [];
   for (const record of event.Records || []) {
-    let batchId;
+    let body;
     try {
-      batchId = JSON.parse(record.body).batchId;
+      body = JSON.parse(record.body);
     } catch {
-      batchId = null;
+      body = null;
     }
-    if (!batchId) {
-      console.error('Ignoring malformed Controller evidence message', record.messageId);
-      continue;
-    }
-    results.push(await processBatch(batchId));
+    // { saveId }: "Save as support" (Phase 4b); { batchId }: "Search All".
+    if (body?.saveId) results.push(await processSave(body.saveId));
+    else if (body?.batchId) results.push(await processBatch(body.batchId));
+    else console.error('Ignoring malformed Controller evidence message', record.messageId);
   }
   return { results };
 };

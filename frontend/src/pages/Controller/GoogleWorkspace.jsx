@@ -1,6 +1,7 @@
-// Controller → Google Workspace: the connection used for evidence (Phase 4)
-// and the opt-in list of mailboxes and Drives that may be searched.
-import { useCallback, useEffect, useState } from 'react';
+// Controller → Google Workspace: the connection used for evidence (Phase 4),
+// the Gmail mailboxes that may be searched, and the invoice folders that
+// are indexed (Drive is indexed only inside these folders).
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Alert,
   Box,
@@ -8,6 +9,11 @@ import {
   Checkbox,
   Chip,
   CircularProgress,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogContentText,
+  DialogTitle,
   Paper,
   Switch,
   Table,
@@ -20,10 +26,31 @@ import {
 } from '@mui/material';
 import useControllerGroup from '../../hooks/useControllerGroup';
 import ControllerGroupSelect from '../../components/controller/ControllerGroupSelect';
-import { getGoogleDirectory, getGoogleSettings, saveGoogleSettings, setGoogleSource, testGoogleConnection } from '../../api/controller';
+import {
+  addGoogleFolder,
+  getGoogleDirectory,
+  getGoogleSettings,
+  indexGoogleFolder,
+  removeGoogleFolder,
+  saveGoogleSettings,
+  setGoogleSource,
+  testGoogleConnection,
+} from '../../api/controller';
 
 const errorText = (err) => err?.response?.data?.message || err?.message;
-export const KIND_LABELS = { Mailbox: 'Gmail mailbox', UserDrive: 'My Drive', SharedDrive: 'Shared drive' };
+export const FOLDER_POLL_MS = 5000;
+const isIndexing = (f) => ['Scanning', 'Indexing'].includes(f.lastRun?.status);
+
+// One line about a folder's index.
+export function folderStatus(f) {
+  const r = f.lastRun;
+  if (!r) return 'Not indexed yet';
+  if (r.status === 'Scanning') return 'Listing files…';
+  if (r.status === 'Indexing') return `Indexing: ${r.indexed + r.failed} of ${r.toIndex} files`;
+  if (r.status === 'Failed') return `Failed: ${r.error || 'unknown error'}`;
+  const when = r.finishedAt ? new Date(r.finishedAt).toLocaleString() : '';
+  return `${f.files ?? 0} file${f.files === 1 ? '' : 's'} indexed (${f.readable ?? 0} readable) · ${when}${r.failed ? ` · ${r.failed} couldn't be read` : ''}`;
+}
 
 export default function GoogleWorkspace() {
   const { groupId, groups, groupsError, setGroupId } = useControllerGroup();
@@ -32,13 +59,21 @@ export default function GoogleWorkspace() {
   const [test, setTest] = useState(null);
   const [directory, setDirectory] = useState(null);
   const [addEmail, setAddEmail] = useState('');
+  const [folderLink, setFolderLink] = useState('');
+  const [folderOwner, setFolderOwner] = useState('');
+  const [removing, setRemoving] = useState(null);
+  const savedEmail = useRef('');
   const [busy, setBusy] = useState(null);
   const [error, setError] = useState(null);
   const [notice, setNotice] = useState(null);
 
   const apply = (d) => {
     setData(d);
-    setAdminEmail(d.settings?.adminEmail || '');
+    // The field follows the saved value unless the user is editing it.
+    const next = d.settings?.adminEmail || '';
+    const prev = savedEmail.current;
+    setAdminEmail((cur) => (cur === '' || cur === prev ? next : cur));
+    savedEmail.current = next;
   };
   const load = useCallback(async () => {
     if (!groupId) return;
@@ -52,8 +87,21 @@ export default function GoogleWorkspace() {
     setData(null);
     setTest(null);
     setDirectory(null);
+    setAdminEmail('');
+    savedEmail.current = '';
     load();
   }, [load]);
+
+  const sources = data?.sources || [];
+  const mailboxes = sources.filter((s) => s.kind === 'Mailbox');
+  const folders = sources.filter((s) => s.kind === 'Folder');
+  const anyIndexing = folders.some(isIndexing);
+  // Refresh while a folder is being indexed.
+  useEffect(() => {
+    if (!anyIndexing) return undefined;
+    const t = setTimeout(load, FOLDER_POLL_MS);
+    return () => clearTimeout(t);
+  }, [anyIndexing, data, load]);
 
   const run = async (name, fn) => {
     setBusy(name);
@@ -64,6 +112,7 @@ export default function GoogleWorkspace() {
       return true;
     } catch (err) {
       setError(err);
+      return false;
     } finally {
       setBusy(null);
     }
@@ -84,9 +133,26 @@ export default function GoogleWorkspace() {
       apply(await setGoogleSource(groupId, source));
       if (directory) setDirectory(await getGoogleDirectory(groupId));
     });
+  const addFolder = () =>
+    run('folder', async () => {
+      const r = await addGoogleFolder(groupId, folderLink.trim(), folderOwner.trim() || undefined);
+      apply(r);
+      setFolderLink('');
+      setFolderOwner('');
+      setNotice(`Added ${r.added.folderPath}. Indexing has started.`);
+    });
+  const reindex = (f) =>
+    run(`index-${f.sourceId}`, async () => {
+      await indexGoogleFolder(groupId, f.sourceId);
+      await load();
+    });
+  const remove = (f) =>
+    run(`remove-${f.sourceId}`, async () => {
+      apply(await removeGoogleFolder(groupId, f.sourceId));
+      setNotice(`Removed ${f.displayName} and its index. Saved support is kept.`);
+    });
 
   const settings = data?.settings;
-  const sources = data?.sources || [];
   const lastTest = test ? { ok: test.ok } : settings?.lastTest;
 
   return (
@@ -107,8 +173,8 @@ export default function GoogleWorkspace() {
             </Typography>
             <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
               The dashboard reads mail and files through a Google service account with domain-wide delegation, acting as the workspace
-              admin to list users and drives. Saved evidence will go to a <b>Controller Evidence</b> folder in the admin account's My Drive.
-              Setup steps: SETUP.md, section 10.
+              admin to list users. Saved support is filed in a <b>Controller Evidence</b> folder in the admin account's My Drive. Setup
+              steps: SETUP.md, section 10.
             </Typography>
             {!data.keyConfigured && (
               <Alert severity="warning" sx={{ mb: 2 }}>
@@ -145,40 +211,103 @@ export default function GoogleWorkspace() {
 
           <Paper variant="outlined" sx={{ p: 2, mb: 2 }}>
             <Typography variant="subtitle1" fontWeight={600} sx={{ mb: 1 }}>
-              Sources searched for evidence
+              Invoice folders
             </Typography>
             <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-              Only the sources switched on here are ever searched. Gmail is searched now; Drives will be searched once the Drive index
-              arrives.
+              Drive is searched only inside these folders (and their subfolders). PDFs, Google Docs and scans or photos are read and
+              re-indexed every night. Paste a folder link from Drive; the folder must be shared with {settings?.adminEmail || 'the admin account'}{' '}
+              or be in a shared drive it belongs to — otherwise enter the account that owns it.
             </Typography>
             <Table size="small">
               <TableHead>
                 <TableRow>
-                  <TableCell>Source</TableCell>
-                  <TableCell>Type</TableCell>
+                  <TableCell>Folder</TableCell>
+                  <TableCell>Index</TableCell>
                   <TableCell>Searched</TableCell>
+                  <TableCell />
                 </TableRow>
               </TableHead>
               <TableBody>
-                {sources.map((s) => (
+                {folders.map((f) => (
+                  <TableRow key={f.sourceId}>
+                    <TableCell>
+                      {f.folderPath || f.displayName}
+                      {f.actAs && f.actAs !== settings?.adminEmail && (
+                        <Typography variant="caption" color="text.secondary" display="block">
+                          Read as {f.actAs}
+                        </Typography>
+                      )}
+                    </TableCell>
+                    <TableCell>
+                      <Typography variant="body2" color={f.lastRun?.status === 'Failed' ? 'error' : 'text.primary'}>
+                        {isIndexing(f) && <CircularProgress size={12} sx={{ mr: 1 }} />}
+                        {folderStatus(f)}
+                      </Typography>
+                    </TableCell>
+                    <TableCell>
+                      <Switch
+                        size="small"
+                        checked={f.enabled}
+                        disabled={Boolean(busy)}
+                        onChange={(e) => setSource({ kind: 'Folder', sourceKey: f.sourceKey, enabled: e.target.checked })}
+                        inputProps={{ 'aria-label': `Search ${f.displayName}` }}
+                      />
+                    </TableCell>
+                    <TableCell sx={{ whiteSpace: 'nowrap' }}>
+                      <Button size="small" disabled={Boolean(busy) || !f.enabled || isIndexing(f)} onClick={() => reindex(f)}>
+                        Index now
+                      </Button>
+                      <Button size="small" color="error" disabled={Boolean(busy)} onClick={() => setRemoving(f)}>
+                        Remove
+                      </Button>
+                    </TableCell>
+                  </TableRow>
+                ))}
+                {folders.length === 0 && (
+                  <TableRow>
+                    <TableCell colSpan={4} sx={{ color: 'text.secondary' }}>
+                      No invoice folders yet.
+                    </TableCell>
+                  </TableRow>
+                )}
+              </TableBody>
+            </Table>
+            <Box sx={{ display: 'flex', gap: 1, alignItems: 'center', flexWrap: 'wrap', mt: 2 }}>
+              <TextField size="small" label="Folder link" placeholder="https://drive.google.com/drive/folders/…" value={folderLink} onChange={(e) => setFolderLink(e.target.value)} disabled={!settings} sx={{ flex: 1, minWidth: 300 }} />
+              <TextField size="small" label="Owner (only if not shared with the admin)" value={folderOwner} onChange={(e) => setFolderOwner(e.target.value)} disabled={!settings} sx={{ minWidth: 280 }} />
+              <Button variant="contained" disabled={!settings || !folderLink.trim() || Boolean(busy)} onClick={addFolder} startIcon={busy === 'folder' ? <CircularProgress size={16} color="inherit" /> : null}>
+                Add folder
+              </Button>
+            </Box>
+          </Paper>
+
+          <Paper variant="outlined" sx={{ p: 2, mb: 2 }}>
+            <Typography variant="subtitle1" fontWeight={600} sx={{ mb: 1 }}>
+              Gmail mailboxes
+            </Typography>
+            <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+              Only the mailboxes switched on here are ever searched.
+            </Typography>
+            <Table size="small">
+              <TableBody>
+                {mailboxes.map((s) => (
                   <TableRow key={s.sourceId}>
                     <TableCell>{s.displayName || s.sourceKey}</TableCell>
-                    <TableCell>{KIND_LABELS[s.kind]}</TableCell>
-                    <TableCell>
+                    <TableCell align="right">
                       <Switch
                         size="small"
                         checked={s.enabled}
                         disabled={Boolean(busy)}
-                        onChange={(e) => setSource({ kind: s.kind, sourceKey: s.sourceKey, enabled: e.target.checked })}
-                        inputProps={{ 'aria-label': `Search ${s.sourceKey} (${KIND_LABELS[s.kind]})` }}
+                        onChange={(e) => setSource({ kind: 'Mailbox', sourceKey: s.sourceKey, enabled: e.target.checked })}
+                        inputProps={{ 'aria-label': `Search ${s.sourceKey} (Gmail mailbox)` }}
                       />
                     </TableCell>
                   </TableRow>
                 ))}
-                {sources.length === 0 && (
+                {mailboxes.length === 0 && (
                   <TableRow>
-                    <TableCell colSpan={3} sx={{ color: 'text.secondary' }}>
-                      No sources yet. Save the admin account to start with its mailbox.
+                    <TableCell colSpan={2} sx={{ color: 'text.secondary' }}>
+                      No mailboxes yet. Save the admin account to start with its mailbox.
                     </TableCell>
                   </TableRow>
                 )}
@@ -189,28 +318,18 @@ export default function GoogleWorkspace() {
               <Button size="small" disabled={!settings || !addEmail.trim() || Boolean(busy)} onClick={() => setSource({ kind: 'Mailbox', sourceKey: addEmail.trim(), enabled: true }).then((ok) => ok && setAddEmail(''))}>
                 Add mailbox
               </Button>
-              <Button size="small" disabled={!settings || !addEmail.trim() || Boolean(busy)} onClick={() => setSource({ kind: 'UserDrive', sourceKey: addEmail.trim(), enabled: true }).then((ok) => ok && setAddEmail(''))}>
-                Add My Drive
-              </Button>
               <Box sx={{ flex: 1 }} />
               <Button size="small" variant="outlined" disabled={!settings || Boolean(busy)} onClick={browse} startIcon={busy === 'browse' ? <CircularProgress size={16} /> : null}>
                 Browse workspace
               </Button>
             </Box>
-          </Paper>
-
-          {directory && (
-            <Paper variant="outlined" sx={{ p: 2, mb: 2 }} data-testid="directory">
-              <Typography variant="subtitle1" fontWeight={600} sx={{ mb: 1 }}>
-                Workspace users
-              </Typography>
-              <Table size="small">
+            {directory && (
+              <Table size="small" sx={{ mt: 2 }} data-testid="directory">
                 <TableHead>
                   <TableRow>
                     <TableCell>User</TableCell>
                     <TableCell>Email</TableCell>
                     <TableCell align="center">Gmail</TableCell>
-                    <TableCell align="center">My Drive</TableCell>
                   </TableRow>
                 </TableHead>
                 <TableBody>
@@ -224,38 +343,38 @@ export default function GoogleWorkspace() {
                       <TableCell align="center">
                         <Checkbox size="small" checked={u.mailbox} disabled={Boolean(busy)} inputProps={{ 'aria-label': `Gmail ${u.email}` }} onChange={(e) => setSource({ kind: 'Mailbox', sourceKey: u.email, displayName: u.name, enabled: e.target.checked })} />
                       </TableCell>
-                      <TableCell align="center">
-                        <Checkbox size="small" checked={u.drive} disabled={Boolean(busy)} inputProps={{ 'aria-label': `My Drive ${u.email}` }} onChange={(e) => setSource({ kind: 'UserDrive', sourceKey: u.email, displayName: u.name, enabled: e.target.checked })} />
-                      </TableCell>
                     </TableRow>
                   ))}
                 </TableBody>
               </Table>
-              <Typography variant="subtitle1" fontWeight={600} sx={{ mt: 2, mb: 1 }}>
-                Shared drives
-              </Typography>
-              {directory.sharedDrives.length === 0 ? (
-                <Typography variant="body2" color="text.secondary">
-                  No shared drives in this workspace.
-                </Typography>
-              ) : (
-                <Table size="small">
-                  <TableBody>
-                    {directory.sharedDrives.map((d) => (
-                      <TableRow key={d.id}>
-                        <TableCell>{d.name}</TableCell>
-                        <TableCell align="right">
-                          <Checkbox size="small" checked={d.enabled} disabled={Boolean(busy)} inputProps={{ 'aria-label': `Shared drive ${d.name}` }} onChange={(e) => setSource({ kind: 'SharedDrive', sourceKey: d.id, displayName: d.name, enabled: e.target.checked })} />
-                        </TableCell>
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              )}
-            </Paper>
-          )}
+            )}
+          </Paper>
         </>
       )}
+
+      <Dialog open={Boolean(removing)} onClose={() => setRemoving(null)}>
+        <DialogTitle>Remove folder</DialogTitle>
+        <DialogContent>
+          <DialogContentText>
+            Stop searching {removing?.folderPath || removing?.displayName} and delete its index? Files in Drive are not touched, and support
+            you already saved is kept.
+          </DialogContentText>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setRemoving(null)}>Cancel</Button>
+          <Button
+            color="error"
+            variant="contained"
+            onClick={() => {
+              const f = removing;
+              setRemoving(null);
+              remove(f);
+            }}
+          >
+            Remove
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Box>
   );
 }

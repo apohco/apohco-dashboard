@@ -67,6 +67,12 @@ describe('scoreCandidate', () => {
     expect(both).toMatchObject({ score: 0.53, entityHintId: null, signals: { amount: true, vendor: false, days: 8, entityTerm: null } });
   });
 
+  test("a workspace address (the management company's name) never counts as naming a practice", () => {
+    const withMgmt = [...ENTITIES, { entityId: 'apo', entityName: 'APOHCO', aliases: [], keywords: [] }];
+    const r = scoreCandidate({ line, entities: withMgmt, candidate: candidate({ from: 'info@apohco.com', text: 'Ship to Lebanon office. Due 1,250.00' }) });
+    expect(r).toMatchObject({ entityHintId: 'leb', signals: { entityTerm: 'Lebanon' } });
+  });
+
   test('the amount can be in an attachment name', () => {
     const r = scoreCandidate({ line, entities: [], candidate: candidate({ attachments: [{ name: 'receipt_1250.00.pdf' }], sentAt: null }) });
     expect(r.signals).toEqual({ amount: true, vendor: false, days: null, entityTerm: null });

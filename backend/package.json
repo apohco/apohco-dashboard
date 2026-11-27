@@ -17,10 +17,13 @@
     "@aws-sdk/client-s3": "^3.699.0",
     "@aws-sdk/client-secrets-manager": "^3.699.0",
     "@aws-sdk/client-sqs": "^3.1173.0",
+    "@aws-sdk/client-textract": "3.1173.0",
     "@aws-sdk/s3-request-presigner": "^3.699.0",
     "aws-jwt-verify": "^4.0.1",
     "axios": "^1.7.7",
     "csv-parse": "^5.6.0",
+    "pdf-lib": "1.17.1",
+    "pdfjs-dist": "3.11.174",
     "pg": "^8.13.1",
     "uuid": "^11.0.3",
     "xlsx": "^0.18.5"

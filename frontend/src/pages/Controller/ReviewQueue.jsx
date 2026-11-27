@@ -885,6 +885,7 @@ export default function ReviewQueue() {
               <MenuItem value="found">Evidence found</MenuItem>
               <MenuItem value="none">Searched, none found</MenuItem>
               <MenuItem value="unsearched">Not searched</MenuItem>
+              <MenuItem value="saved">Supported (saved)</MenuItem>
             </Select>
           </Box>
           <EvidenceJobProgress groupId={groupId} jobId={evidenceJobId} onDone={onEvidenceDone} />

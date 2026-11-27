@@ -127,8 +127,11 @@ function scoreCandidate({ line, vendorNames = [], entities = [], candidate }) {
   if (candidate.sentAt && line.txnDate) {
     days = Math.round(Math.abs(new Date(candidate.sentAt) - new Date(`${line.txnDate}T00:00:00Z`)) / 86400000);
   }
-  // The practice it names: one entity's terms only (two = no hint).
-  const hits = buildEntityTerms(entities).filter((t) => containsTerm(haystack, t.term));
+  // The practice it names: one entity's terms only (two = no hint). Not
+  // the sender / owner: every workspace address contains the management
+  // company's name, which would name it on every candidate.
+  const content = [candidate.subject, candidate.snippet, candidate.text, ...(candidate.attachments || []).map((a) => a.name)].filter(Boolean).join('\n');
+  const hits = buildEntityTerms(entities).filter((t) => containsTerm(content, t.term));
   const ids = new Set(hits.map((h) => h.entityId));
   const hit = ids.size === 1 ? hits.find((h) => h.kind !== 'name') || hits[0] : null;
 

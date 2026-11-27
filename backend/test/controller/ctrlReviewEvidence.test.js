@@ -44,16 +44,17 @@ test('lines carry an evidence summary', async () => {
   setup([
     [/GROUP BY s.Status/, { rows: [] }],
     [/SELECT COUNT\(\*\)::int AS n, COALESCE/, { rows: [{ n: 1, amount: '1' }] }],
-    [/ORDER BY CASE s.Status/, { rows: [{ lineid: id(1), confidence: '0.5', status: 'NeedsEvidence', reasons: [], amount: '1', debit: '1', credit: '0', evidencecount: 2, evidencebest: '0.8500', evidencehint: 'leb', evidencesearchedat: 'now' }] }],
+    [/ORDER BY CASE s.Status/, { rows: [{ lineid: id(1), confidence: '0.5', status: 'NeedsEvidence', reasons: [], amount: '1', debit: '1', credit: '0', evidencecount: 2, evidencebest: '0.8500', evidencehint: 'leb', evidencesearchedat: 'now', evidencesaved: 1 }] }],
   ]);
   const res = await handler(apiEvent({ method: 'GET', resource: '/api/controller/review/lines', query: { groupId: 'group-1', runId: RUN_ID } }));
-  expect(parseBody(res).lines[0].evidence).toEqual({ count: 2, best: 0.85, entityHintId: 'leb', searchedAt: 'now' });
+  expect(parseBody(res).lines[0].evidence).toEqual({ count: 2, best: 0.85, entityHintId: 'leb', searchedAt: 'now', saved: 1 });
 });
 
 test('the evidence filter', () => {
   expect(buildFilterSql(parseFilters({ evidence: 'found' }), 4).sql).toMatch(/ev\.n > 0/);
   expect(buildFilterSql(parseFilters({ evidence: 'none' }), 4).sql).toMatch(/es\.Fingerprint IS NOT NULL AND ev\.n = 0/);
   expect(buildFilterSql(parseFilters({ evidence: 'unsearched' }), 4).sql).toMatch(/es\.Fingerprint IS NULL/);
+  expect(buildFilterSql(parseFilters({ evidence: 'saved' }), 4).sql).toMatch(/sv.saved > 0/);
   expect(() => parseFilters({ evidence: 'maybe' })).toThrow(/evidence must be/);
 });
 
@@ -82,7 +83,7 @@ describe('Search All', () => {
     setup([[/FROM CtrlGoogleSources/, { rows: [] }], [/FROM CtrlSuggestions s/, { rows: [{ lineid: id(1), amt: '1' }] }]]);
     const res = await post({ lineIds: [id(1)] });
     expect(res.statusCode).toBe(409);
-    expect(parseBody(res).message).toMatch(/No mailbox is opted in/);
+    expect(parseBody(res).message).toMatch(/No mailbox or invoice folder is switched on/);
   });
 
   test('batches SQS refused are marked Failed', async () => {
