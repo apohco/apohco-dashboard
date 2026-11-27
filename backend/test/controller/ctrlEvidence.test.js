@@ -1,7 +1,7 @@
 jest.mock('../../src/shared/verifyToken', () => ({ requireAuth: jest.fn() }));
 jest.mock('../../src/shared/db', () => ({ query: jest.fn(), withTransaction: jest.fn() }));
 jest.mock('../../src/shared/googleApi', () => ({ ...jest.requireActual('../../src/shared/googleApi'), gmailGetMessage: jest.fn() }));
-jest.mock('../../src/shared/ctrlEvidence', () => ({ ...jest.requireActual('../../src/shared/ctrlEvidence'), searchLines: jest.fn() }));
+jest.mock('../../src/shared/ctrlEvidence', () => ({ ...jest.requireActual('../../src/shared/ctrlEvidence'), searchLines: jest.fn(), searchInvoiceNumbers: jest.fn() }));
 jest.mock('../../src/shared/ctrlQueue', () => ({ enqueueEvidenceSave: jest.fn() }));
 jest.mock('../../src/shared/evidenceSave', () => ({
   ...jest.requireActual('../../src/shared/evidenceSave'),
@@ -12,7 +12,7 @@ jest.mock('../../src/shared/evidenceSave', () => ({
 const { requireAuth } = require('../../src/shared/verifyToken');
 const { query } = require('../../src/shared/db');
 const google = require('../../src/shared/googleApi');
-const { searchLines } = require('../../src/shared/ctrlEvidence');
+const { searchLines, searchInvoiceNumbers } = require('../../src/shared/ctrlEvidence');
 const { enqueueEvidenceSave } = require('../../src/shared/ctrlQueue');
 const { processSave, downloadUrl } = require('../../src/shared/evidenceSave');
 const { handler } = require('../../src/functions/controller/ctrlEvidence');
@@ -69,6 +69,16 @@ test('Find Evidence before the Google key is stored: a clear 409', async () => {
   setup();
   searchLines.mockRejectedValue(Object.assign(new Error('The Google service account key has not been stored yet'), { code: 'GOOGLE_NOT_CONFIGURED' }));
   expect((await post('/api/controller/evidence/find', { runId: RUN_ID, lineId: LINE_ID })).statusCode).toBe(409);
+});
+
+test('search by invoice numbers: checked, searched for the line, candidates returned', async () => {
+  setup();
+  searchInvoiceNumbers.mockResolvedValue({ numbers: ['4471', '4472'], foundNumbers: ['4471'], notFound: ['4472'], found: 1, sources: 2, errors: [] });
+  const res = await post('/api/controller/evidence/invoices', { runId: RUN_ID, lineId: LINE_ID, numbers: '#4471, INV-4472' });
+  expect(res.statusCode).toBe(200);
+  expect(searchInvoiceNumbers.mock.calls[0][0]).toMatchObject({ groupId: 'g1', qboId: 'q1', numbers: ['4471', '4472'], line: { lineId: LINE_ID, fingerprint: 'f1' } });
+  expect(parseBody(res)).toMatchObject({ notFound: ['4472'], candidates: [{ candidateId: CAND_ID }] });
+  expect((await post('/api/controller/evidence/invoices', { runId: RUN_ID, lineId: LINE_ID, numbers: '' })).statusCode).toBe(400);
 });
 
 test('a line outside the run is not found', async () => {

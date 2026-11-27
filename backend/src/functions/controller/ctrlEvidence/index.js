@@ -3,6 +3,8 @@
 //   GET  /api/controller/evidence?groupId=&runId=&lineId=     a line's candidates and saved support
 //   POST /api/controller/evidence/find                        { groupId, runId, lineId }
 //        "Find Evidence": searches the opted-in mailboxes and invoice folders now
+//   POST /api/controller/evidence/invoices                    { groupId, runId, lineId, numbers }
+//        search the opted-in sources for these invoice numbers (18 months back)
 //   GET  /api/controller/evidence/jobs/{jobId}?groupId=       "Search All" progress
 //   GET  /api/controller/evidence/{candidateId}/preview?groupId=
 //        an email (fetched on demand, plain text, never stored) or a folder
@@ -22,8 +24,8 @@ const { json, withErrorHandling } = require('../../../shared/response');
 const { recordAudit } = require('../../../shared/audit');
 const { badRequest, isUuid, loadRun } = require('../../../shared/ctrlReviewData');
 const google = require('../../../shared/googleApi');
-const { extractMessage } = require('../../../shared/evidenceMatcher');
-const { searchLines, loadCandidates, loadSources } = require('../../../shared/ctrlEvidence');
+const { extractMessage, cleanInvoiceNumber } = require('../../../shared/evidenceMatcher');
+const { searchLines, searchInvoiceNumbers, loadCandidates, loadSources } = require('../../../shared/ctrlEvidence');
 const { enqueueEvidenceSave } = require('../../../shared/ctrlQueue');
 const { downloadUrl, DOWNLOAD_URL_SECONDS } = require('../../../shared/evidenceSave');
 
@@ -61,6 +63,35 @@ async function handleFind(claims, body) {
   let result;
   try {
     result = await searchLines({ groupId: body.groupId, qboId: run.qboid, lines: [line], userId: claims.userId, via: 'FindEvidence' });
+  } catch (err) {
+    if (err.code === 'GOOGLE_NOT_CONFIGURED') throw badRequest(err.message, 409);
+    throw err;
+  }
+  return json(200, { ...result, ...(await loadCandidates(body.groupId, run.qboid, line.fingerprint)) });
+}
+
+// The invoice numbers asked for: a list or "4471, 4472 4480"; 1 to 20.
+function parseInvoiceNumbers(value) {
+  const raw = Array.isArray(value) ? value : String(value || '').split(/[\s,;]+/);
+  const out = [];
+  for (const v of raw) {
+    const n = cleanInvoiceNumber(v);
+    if (!n) continue;
+    if (!/^[A-Za-z0-9][A-Za-z0-9\-/.]{1,39}$/.test(n)) throw badRequest(`"${String(v).slice(0, 40)}" doesn't look like an invoice number`);
+    if (!out.some((x) => x.toLowerCase() === n.toLowerCase())) out.push(n);
+  }
+  if (!out.length) throw badRequest('Enter at least one invoice number');
+  if (out.length > 20) throw badRequest('At most 20 invoice numbers at a time');
+  return out;
+}
+
+// POST /evidence/invoices { groupId, runId, lineId, numbers }
+async function handleInvoices(claims, body) {
+  const numbers = parseInvoiceNumbers(body.numbers);
+  const { run, line } = await loadRunLine(body.groupId, body.runId, body.lineId);
+  let result;
+  try {
+    result = await searchInvoiceNumbers({ groupId: body.groupId, qboId: run.qboid, line, numbers, userId: claims.userId });
   } catch (err) {
     if (err.code === 'GOOGLE_NOT_CONFIGURED') throw badRequest(err.message, 409);
     throw err;
@@ -212,6 +243,8 @@ async function handleDownload(claims, groupId, savedId) {
   return json(200, { url, fileName: rows[0].filename, expiresInSeconds: DOWNLOAD_URL_SECONDS });
 }
 
+exports.parseInvoiceNumbers = parseInvoiceNumbers;
+
 exports.handler = withErrorHandling(async (event) => {
   const claims = await authorizeController(event);
   const { resource, httpMethod } = event;
@@ -233,6 +266,7 @@ exports.handler = withErrorHandling(async (event) => {
   if (!body.groupId) throw badRequest('groupId is required');
   requireGroupAccess(claims, body.groupId);
   if (httpMethod === 'POST' && resource.endsWith('/find')) return handleFind(claims, body);
+  if (httpMethod === 'POST' && resource.endsWith('/invoices')) return handleInvoices(claims, body);
   if (httpMethod === 'POST' && resource.endsWith('/confirm')) return handleConfirm(claims, body.groupId, event.pathParameters?.candidateId, body);
   throw badRequest('Unknown evidence route', 404);
 });

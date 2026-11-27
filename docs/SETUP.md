@@ -584,6 +584,15 @@ admin's evidence folders. The deploy adds:
   **Supported (saved)** lists supported lines.
 - Cost: Textract is about $1.50 per 1,000 scanned pages. Text PDFs and Docs
   cost nothing to read.
+- **Invoices behind a payment** (Line detail): type invoice numbers, or click
+  **Find invoices …** when a match mentions them ("Invoices #4471, #4472 and
+  4480"). The opted-in mailboxes are searched up to 18 months before the
+  payment, Trash and archived mail included (`POST
+  /api/controller/evidence/invoices`), and so is the folder index. Each
+  invoice found is labelled with its number and total; the total is read from
+  the email, or from its attached PDF's text. A running check shows how much
+  of the payment the invoices found add up to. An ordinary Find Evidence
+  leaves invoices found by number in place.
 
 ## 10. Before Phase 4: Google Workspace (Gmail and Drive evidence)
 

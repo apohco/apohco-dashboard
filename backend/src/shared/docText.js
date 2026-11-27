@@ -136,4 +136,13 @@ async function extractFile({ mimeType, data }, deps = {}) {
   }
 }
 
-module.exports = { extractFile, extractAmounts, extractDates, ocr, splitPages, OCR_MIME, TEXT_MIME, OCR_PAGES, MAX_TEXT };
+// A PDF's text layer only (no OCR): '' when it has none or can't be read.
+async function pdfText(data) {
+  try {
+    return clean((await pdfTextLayer(data)).text).slice(0, MAX_TEXT);
+  } catch {
+    return '';
+  }
+}
+
+module.exports = { extractFile, extractAmounts, extractDates, ocr, splitPages, pdfText, OCR_MIME, TEXT_MIME, OCR_PAGES, MAX_TEXT };

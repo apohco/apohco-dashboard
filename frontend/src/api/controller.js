@@ -159,6 +159,11 @@ export const indexGoogleFolder = (groupId, sourceId) =>
 export const removeGoogleFolder = (groupId, sourceId) =>
   apiClient.delete(`/api/controller/google/folders/${sourceId}`, { params: { groupId } }).then((r) => r.data);
 
+// Search the opted-in sources for invoice numbers (a payment covering
+// several invoices). numbers: list or "4471, 4472".
+export const searchInvoiceNumbers = (groupId, runId, lineId, numbers) =>
+  apiClient.post('/api/controller/evidence/invoices', { groupId, runId, lineId, numbers }).then((r) => r.data);
+
 // Save as support (Phase 4b).
 export const confirmEvidence = (groupId, runId, lineId, candidateId) =>
   apiClient.post(`/api/controller/evidence/${candidateId}/confirm`, { groupId, runId, lineId }).then((r) => r.data);

@@ -11,7 +11,18 @@ const { recordAudit } = require('./audit');
 const { payeeKey } = require('./reviewEngine');
 const { loadEntities } = require('./ctrlReviewData');
 const google = require('./googleApi');
-const { buildGmailQueries, extractMessage, scoreCandidate, vendorTerms, amountFormats } = require('./evidenceMatcher');
+const { pdfText } = require('./docText');
+const {
+  buildGmailQueries,
+  extractMessage,
+  scoreCandidate,
+  vendorTerms,
+  amountFormats,
+  extractInvoiceNumbers,
+  buildInvoiceQueries,
+  scoreInvoiceCandidate,
+  readInvoiceTotal,
+} = require('./evidenceMatcher');
 
 const PER_QUERY = 10;
 const MAX_FETCH_PER_LINE = 8;
@@ -107,7 +118,9 @@ async function searchMailbox({ mailbox, line, vendorNames, senders, entities, fe
   for (const { id } of [...ids.values()].slice(0, MAX_FETCH_PER_LINE)) {
     const msg = extractMessage(await fetchMessage(mailbox, id));
     const { score, signals, entityHintId } = scoreCandidate({ line, vendorNames, entities, candidate: msg });
-    if (score >= MIN_SCORE) found.push({ source: 'Gmail', account: mailbox, msg, score, signals, entityHintId });
+    // Invoice numbers it mentions (a payment for several invoices).
+    const mentions = extractInvoiceNumbers([msg.subject, msg.text].join('\n')).slice(0, 10);
+    if (score >= MIN_SCORE) found.push({ source: 'Gmail', account: mailbox, msg, score, signals: { ...signals, mentions }, entityHintId });
   }
   return found;
 }
@@ -168,7 +181,7 @@ async function searchFolders({ groupId, folderIds, line, vendorNames, entities }
         id: r.fileid, threadId: null, subject: r.name, from: r.owneremail || '', sentAt: candidate.sentAt, snippet: snippetAround(r.text, line.amount), attachments: [],
       },
       score,
-      signals,
+      signals: { ...signals, mentions: extractInvoiceNumbers([r.name, r.text].join('\n')).slice(0, 10) },
       entityHintId,
       link: r.webviewlink,
       path: [r.foldername, r.path].filter(Boolean).join(' / '),
@@ -224,7 +237,7 @@ async function searchLines({ groupId, qboId, lines, userId = null, via, api = go
       // candidates (only the error is recorded).
       const replace = [...(gmailAllFailed ? [] : ['Gmail']), ...(folderIds.length ? ['Drive'] : [])];
       if (replace.length) {
-        await client.query(`DELETE FROM CtrlEvidenceCandidates WHERE QBOId = $1 AND Fingerprint = $2 AND Source = ANY($3::text[])`, [qboId, line.fingerprint, replace]);
+        await client.query(`DELETE FROM CtrlEvidenceCandidates WHERE QBOId = $1 AND Fingerprint = $2 AND Source = ANY($3::text[]) AND NOT (Signals ? 'invoiceNumber')`, [qboId, line.fingerprint, replace]);
       }
       const keep = found.filter((f) => replace.includes(f.source));
       if (keep.length) {
@@ -319,4 +332,125 @@ async function loadCandidates(groupId, qboId, fingerprint) {
   };
 }
 
-module.exports = { loadGoogleSettings, loadSources, searchLines, loadCandidates, mapLimit, nearestDate, snippetAround, MIN_SCORE, KEEP_PER_LINE };
+// ---- Search by invoice number (a payment covering several invoices)
+
+const INVOICE_PER_QUERY = 15;
+const INVOICE_FETCH = 15;
+const MAX_ATTACHMENT_READS = 6;
+const MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024;
+const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+// Searches the opted-in mailboxes and invoice folders for these invoice
+// numbers (up to 18 months before the line), and replaces the line's
+// earlier candidates for the same numbers. Returns { numbers, found, sources, errors }.
+async function searchInvoiceNumbers({ groupId, qboId, line, numbers, userId = null, api = google }) {
+  const mailboxes = (await loadSources(groupId, { kind: 'Mailbox' })).map((s) => s.sourceKey);
+  const folderIds = (await loadSources(groupId, { kind: 'Folder' })).map((s) => s.sourceId);
+  if (!mailboxes.length && !folderIds.length) {
+    const err = new Error('No mailbox or invoice folder is switched on yet (Controller → Google Workspace)');
+    err.statusCode = 409;
+    throw err;
+  }
+  const entities = await loadEntities(groupId);
+  const info = await loadVendorInfo(groupId, [payeeKey(line.payeeName)].filter(Boolean));
+  const vendorNames = info.get(payeeKey(line.payeeName))?.names || (line.payeeName ? [line.payeeName] : []);
+  const found = [];
+  const errors = [];
+
+  for (const mailbox of mailboxes) {
+    try {
+      const ids = new Map();
+      for (const q of buildInvoiceQueries({ txnDate: line.txnDate, numbers })) {
+        for (const m of await api.gmailSearch(mailbox, q, { maxResults: INVOICE_PER_QUERY })) ids.set(m.id, m);
+      }
+      let readPdfs = 0;
+      for (const { id } of [...ids.values()].slice(0, INVOICE_FETCH)) {
+        const msg = extractMessage(await api.gmailGetMessage(mailbox, id, { format: 'full' }));
+        const s = scoreInvoiceCandidate({ vendorNames, entities, candidate: msg, numbers });
+        if (!s.matched.length) continue;
+        // The total is often only in the attached invoice PDF: read its text
+        // layer (no OCR), a few small ones per search.
+        if (s.signals.invoiceTotal === null && readPdfs < MAX_ATTACHMENT_READS) {
+          const pdf = msg.attachments.find((a) => /\.pdf$/i.test(a.name) && a.attachmentId && a.size <= MAX_ATTACHMENT_BYTES);
+          if (pdf) {
+            readPdfs += 1;
+            try {
+              const text = await pdfText(await api.gmailGetAttachment(mailbox, id, pdf.attachmentId));
+              s.signals.invoiceTotal = readInvoiceTotal(text);
+            } catch {
+              // Total unknown; the match still counts.
+            }
+          }
+        }
+        found.push({ source: 'Gmail', account: mailbox, msg, ...s });
+      }
+    } catch (err) {
+      errors.push(`${mailbox}: ${err.message}`);
+    }
+  }
+
+  if (folderIds.length) {
+    // Whole-token matches in the file name or text (\m \M: word boundaries).
+    const patterns = numbers.map((n) => `\\m${escapeRe(n)}\\M`);
+    const { rows } = await query(
+      `SELECT f.FileId, f.SourceId, f.Name, f.OwnerEmail, f.Path, f.ModifiedTime, f.WebViewLink, left(f.Text, 20000) AS Text, s.DisplayName AS FolderName
+       FROM CtrlDriveFiles f JOIN CtrlGoogleSources s ON s.SourceId = f.SourceId
+       WHERE f.GroupId = $1 AND f.SourceId = ANY($2::uuid[]) AND (f.Name ~* ANY($3::text[]) OR f.Text ~* ANY($3::text[]))
+       ORDER BY f.ModifiedTime DESC NULLS LAST LIMIT 50`,
+      [groupId, folderIds, patterns]
+    );
+    for (const r of rows) {
+      const candidate = { subject: r.name, from: r.owneremail || '', snippet: '', text: r.text, attachments: [] };
+      const s = scoreInvoiceCandidate({ vendorNames, entities, candidate, numbers });
+      if (!s.matched.length) continue;
+      found.push({
+        source: 'Drive', account: r.sourceid, ...s, link: r.webviewlink, path: [r.foldername, r.path].filter(Boolean).join(' / '),
+        msg: { id: r.fileid, threadId: null, subject: r.name, from: r.owneremail || '', sentAt: r.modifiedtime ? new Date(r.modifiedtime).toISOString() : null, snippet: snippetAround(r.text, s.signals.invoiceTotal || 0), attachments: [] },
+      });
+    }
+  }
+
+  await withTransaction(async (client) => {
+    // A new search for a number replaces what the last one found for it.
+    await client.query(
+      `DELETE FROM CtrlEvidenceCandidates WHERE QBOId = $1 AND Fingerprint = $2 AND Signals ->> 'invoiceNumber' = ANY($3::text[])`,
+      [qboId, line.fingerprint, numbers]
+    );
+    if (found.length) {
+      await insertRows(
+        client,
+        'CtrlEvidenceCandidates',
+        CANDIDATE_COLUMNS,
+        found.map((f) => [
+          groupId, qboId, line.fingerprint, f.source, f.account, f.msg.id, f.msg.threadId, String(f.msg.subject || '').slice(0, 1000),
+          String(f.msg.from || '').slice(0, 500), f.msg.sentAt, f.msg.snippet, (f.msg.attachments || []).map((a) => a.name.slice(0, 255)).slice(0, 20),
+          f.score, JSON.stringify(f.signals), f.entityHintId, f.link || null, f.path || null,
+        ]),
+        // Already a candidate (e.g. the payment email itself): kept as is.
+        'ON CONFLICT (GroupId, QBOId, Fingerprint, Source, SourceAccount, ExternalId) DO NOTHING'
+      );
+    }
+    await recordAudit(
+      {
+        groupId, userId, action: 'ctrl.evidence.invoices', targetType: 'QBO', targetId: qboId,
+        details: { numbers, mailboxes, folders: folderIds.length, found: found.length, errors: errors.length },
+      },
+      client
+    );
+  });
+  const foundNumbers = [...new Set(found.flatMap((f) => f.matched))];
+  return { numbers, foundNumbers, notFound: numbers.filter((n) => !foundNumbers.includes(n)), found: found.length, sources: mailboxes.length + folderIds.length, errors };
+}
+
+module.exports = {
+  loadGoogleSettings,
+  loadSources,
+  searchLines,
+  searchInvoiceNumbers,
+  loadCandidates,
+  mapLimit,
+  nearestDate,
+  snippetAround,
+  MIN_SCORE,
+  KEEP_PER_LINE,
+};

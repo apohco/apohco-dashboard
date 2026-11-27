@@ -148,4 +148,109 @@ function scoreCandidate({ line, vendorNames = [], entities = [], candidate }) {
   };
 }
 
-module.exports = { DAYS_WINDOW, WEIGHTS, amountFormats, vendorTerms, buildGmailQueries, stripHtml, extractMessage, scoreCandidate };
+// ---- Invoice numbers (a payment that covers several invoices)
+
+const INVOICE_MONTHS_BACK = 18;
+const MAX_INVOICE_NUMBERS = 20;
+const DATE_LIKE = /^\d{1,4}[/-]\d{1,2}[/-]\d{1,4}$/;
+const TOKEN = /^\s*(?:no\.?|nos\.?|number|num|#|:)*\s*#?\s*([A-Za-z]{0,6}[-#]?\d[A-Za-z0-9\-/]*)/i;
+
+// "INV-4471" -> "4471"; "#A-1023" -> "A-1023".
+const cleanInvoiceNumber = (t) =>
+  String(t || '').trim().replace(/^(?:invoice|inv)/i, '').replace(/^[-#\s]+/, '').replace(/[-/.]+$/, '');
+const SEPARATOR = /^\s*(?:,|;|&|\band\b)\s*/i;
+
+// Invoice numbers written in a text: "Invoice #4471", "Inv No. 4471",
+// "INV-4471", and lists such as "Invoices #4471, #4472 and 4480". Dates
+// and amounts are not invoice numbers. Unique, at most 20.
+function extractInvoiceNumbers(text) {
+  const t = String(text || '');
+  const out = [];
+  const add = (raw) => {
+    const n = cleanInvoiceNumber(raw);
+    if (n.length < 3 || n.length > 40 || !/\d/.test(n) || DATE_LIKE.test(n) || /^\d+\.\d{2}$/.test(n)) return;
+    if (!out.some((x) => x.toLowerCase() === n.toLowerCase()) && out.length < MAX_INVOICE_NUMBERS) out.push(n);
+  };
+  // After "invoice(s)": a number, then more only while each is joined by a
+  // list separator ("#4471, #4472 and 4480"); anything else ends the list.
+  for (const m of t.matchAll(/\b(?:invoices?|inv)\b\.?/gi)) {
+    let rest = t.slice(m.index + m[0].length, m.index + m[0].length + 200);
+    for (;;) {
+      const tok = rest.match(TOKEN);
+      if (!tok) break;
+      add(tok[1]);
+      rest = rest.slice(tok[0].length);
+      const sep = rest.match(SEPARATOR);
+      if (!sep) break;
+      rest = rest.slice(sep[0].length);
+    }
+  }
+  for (const m of t.matchAll(/\bINV[-#]?\s?(\d{3,})\b/gi)) add(m[1]);
+  return out;
+}
+
+// The invoice's own total ("Total due $1,250.00", "Amount due: 1,250.00",
+// "Balance due 1250.00"): the last one written, or null.
+function readInvoiceTotal(text) {
+  let found = null;
+  const re = /\b(?:grand total|invoice total|total due|amount due|balance due|total)\b\s*[:-]?\s*(?:usd)?\s*\$?\s*((?:\d{1,3}(?:,\d{3})+|\d+)\.\d{2})/gi;
+  for (const m of String(text || '').matchAll(re)) found = Number(m[1].replace(/,/g, ''));
+  return found;
+}
+
+// Gmail searches for invoice numbers, up to 18 months before the payment
+// (invoices are often paid long after they are sent). 10 numbers a query.
+function buildInvoiceQueries({ txnDate, numbers }) {
+  const d = new Date(`${txnDate}T00:00:00Z`);
+  if (Number.isNaN(d.getTime()) || !numbers?.length) return [];
+  const after = new Date(d);
+  after.setUTCMonth(after.getUTCMonth() - INVOICE_MONTHS_BACK);
+  const before = new Date(d.getTime() + 2 * 86400000);
+  // in:anywhere: paid invoices are often deleted or archived afterwards,
+  // and a specific number keeps Spam / Trash noise out.
+  const window = `after:${gmailDate(after)} before:${gmailDate(before)} in:anywhere`;
+  const out = [];
+  for (let i = 0; i < numbers.length; i += 10) out.push(`(${numbers.slice(i, i + 10).map(quote).join(' OR ')}) ${window}`);
+  return out;
+}
+
+// Which of the numbers a candidate contains (as a whole token).
+function invoiceNumbersIn(candidate, numbers) {
+  const haystack = [candidate.subject, candidate.snippet, candidate.text, ...(candidate.attachments || []).map((a) => a.name)].filter(Boolean).join('\n');
+  return numbers.filter((n) => new RegExp(`(^|[^A-Za-z0-9])${n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}([^A-Za-z0-9]|$)`, 'i').test(haystack));
+}
+
+// An invoice found by its number: the number is the main signal, with
+// the vendor and the practice it names.
+function scoreInvoiceCandidate({ vendorNames = [], entities = [], candidate, numbers }) {
+  const matched = invoiceNumbersIn(candidate, numbers);
+  const base = scoreCandidate({ line: { txnDate: null, amount: 0 }, vendorNames, entities, candidate });
+  let score = matched.length ? 0.6 : 0;
+  if (base.signals.vendor) score += WEIGHTS.vendor;
+  if (base.entityHintId) score += WEIGHTS.entity;
+  const total = readInvoiceTotal(candidate.text);
+  return {
+    matched,
+    score: Math.round(Math.min(1, score) * 10000) / 10000,
+    signals: { invoiceNumber: matched[0] || null, invoiceNumbers: matched, invoiceTotal: total, vendor: base.signals.vendor, entityTerm: base.signals.entityTerm },
+    entityHintId: base.entityHintId,
+  };
+}
+
+module.exports = {
+  DAYS_WINDOW,
+  WEIGHTS,
+  INVOICE_MONTHS_BACK,
+  amountFormats,
+  vendorTerms,
+  buildGmailQueries,
+  stripHtml,
+  extractMessage,
+  scoreCandidate,
+  extractInvoiceNumbers,
+  cleanInvoiceNumber,
+  readInvoiceTotal,
+  buildInvoiceQueries,
+  invoiceNumbersIn,
+  scoreInvoiceCandidate,
+};

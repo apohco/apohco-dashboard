@@ -20,6 +20,7 @@ vi.mock('../../api/controller', () => ({
   getEvidencePreview: vi.fn(),
   confirmEvidence: vi.fn(),
   getSavedEvidenceDownload: vi.fn(),
+  searchInvoiceNumbers: vi.fn(),
 }));
 vi.mock('../../api/settings', () => ({ listGroups: vi.fn() }));
 
@@ -36,10 +37,11 @@ import {
   getEvidencePreview,
   confirmEvidence,
   getSavedEvidenceDownload,
+  searchInvoiceNumbers,
 } from '../../api/controller';
 import { listGroups } from '../../api/settings';
 import ReviewQueue from './ReviewQueue';
-import { signalLabels } from '../../components/controller/Evidence';
+import { signalLabels, mentionedInvoices, invoiceSummary } from '../../components/controller/Evidence';
 
 const ENTITIES = [
   { entityId: 'leb', entityName: 'Lebanon' },
@@ -183,5 +185,57 @@ describe('Phase 4b: invoice folders and Save as support', () => {
     render(<ReviewQueue />, { wrapper: MemoryRouter });
     expect(await screen.findByText('Supported')).toBeInTheDocument();
     expect(screen.getByText('View support')).toBeInTheDocument();
+  });
+});
+
+describe('invoices behind a payment', () => {
+  const PAYMENT = { ...CANDIDATE, candidateId: 'p1', title: 'Payment confirmation', signals: { amount: true, vendor: true, days: 0, mentions: ['4471', '4472', '4480'] }, entityHintId: null, saved: null };
+  const inv = (n, total, over = {}) => ({
+    ...CANDIDATE, candidateId: `i${n}`, title: `Patterson Invoice ${n}`, saved: null, entityHintId: null,
+    signals: { invoiceNumber: n, invoiceNumbers: [n], invoiceTotal: total, vendor: true }, ...over,
+  });
+
+  test('helpers', () => {
+    expect(mentionedInvoices([PAYMENT, inv('4471', 400)])).toEqual(['4472', '4480']);
+    expect(invoiceSummary([inv('4471', 400), inv('4471', null, { candidateId: 'dup', source: 'Drive' }), inv('4472', null)])).toEqual({
+      invoices: [{ number: '4471', total: 400 }, { number: '4472', total: null }], sum: 400, missingTotals: 1,
+    });
+    expect(signalLabels(inv('4471', 412.5).signals, () => '', null)).toEqual(['Invoice 4471 · total $412.50', 'Vendor matches']);
+  });
+
+  test('the numbers a payment email mentions can be searched in one click; the totals are checked against the payment', async () => {
+    const user = userEvent.setup();
+    listReviewLines.mockResolvedValue(response([line({ evidence: { count: 1, best: 1, entityHintId: null, searchedAt: 'x', saved: 0 } })]));
+    getLineEvidence.mockResolvedValue({ candidates: [PAYMENT], saved: [], lastSearch: { at: '2026-11-27T10:00:00Z', sources: 2, found: 1 } });
+    searchInvoiceNumbers.mockResolvedValue({
+      numbers: ['4471', '4472', '4480'], foundNumbers: ['4471', '4472', '4480'], notFound: [], found: 3, sources: 2, errors: [],
+      candidates: [PAYMENT, inv('4471', 400), inv('4472', 600), inv('4480', 250)], saved: [], lastSearch: null,
+    });
+    render(<ReviewQueue />, { wrapper: MemoryRouter });
+    await user.click(await screen.findByText('1 found · best 100%'));
+    const box = await screen.findByTestId('invoice-search');
+    expect(within(box).getByText('A match mentions invoices 4471, 4472, 4480.')).toBeInTheDocument();
+    await user.click(within(box).getByRole('button', { name: 'Find invoices 4471, 4472, 4480' }));
+    expect(searchInvoiceNumbers).toHaveBeenCalledWith('g1', 'run-1', 'l1', ['4471', '4472', '4480']);
+    expect(await within(box).findByText('Found 4471, 4472, 4480.')).toBeInTheDocument();
+    expect(within(box).getByTestId('invoice-total')).toHaveTextContent('3 invoices found: $1,250.00 of the $1,250.00 payment ✓ adds up');
+    expect(screen.getByText('Invoice 4472 · total $600.00')).toBeInTheDocument();
+    // All found: nothing left to suggest.
+    expect(within(box).queryByText(/A match mentions/)).not.toBeInTheDocument();
+  });
+
+  test('type invoice numbers; ones not found are listed', async () => {
+    const user = userEvent.setup();
+    listReviewLines.mockResolvedValue(response([line({ evidence: { count: 1, best: 1, entityHintId: null, searchedAt: 'x', saved: 0 } })]));
+    getLineEvidence.mockResolvedValue({ candidates: [CANDIDATE], saved: [], lastSearch: null });
+    searchInvoiceNumbers.mockResolvedValue({ numbers: ['9001', '9002'], foundNumbers: ['9001'], notFound: ['9002'], found: 1, errors: [], candidates: [CANDIDATE, inv('9001', 100)], saved: [] });
+    render(<ReviewQueue />, { wrapper: MemoryRouter });
+    await user.click(await screen.findByText('1 found · best 100%'));
+    const box = await screen.findByTestId('invoice-search');
+    await user.type(within(box).getByLabelText('Invoice numbers'), '9001, 9002');
+    await user.click(within(box).getByRole('button', { name: 'Search' }));
+    expect(searchInvoiceNumbers).toHaveBeenCalledWith('g1', 'run-1', 'l1', '9001, 9002');
+    expect(await within(box).findByText('Found 9001. Not found: 9002.')).toBeInTheDocument();
+    expect(within(box).getByTestId('invoice-total')).toHaveTextContent('1 invoice found: $100.00 of the $1,250.00 payment');
   });
 });

@@ -19,9 +19,18 @@ import {
   Link,
   Paper,
   Stack,
+  TextField,
   Typography,
 } from '@mui/material';
-import { confirmEvidence, findEvidence, getEvidenceJob, getEvidencePreview, getLineEvidence, getSavedEvidenceDownload } from '../../api/controller';
+import {
+  confirmEvidence,
+  findEvidence,
+  getEvidenceJob,
+  getEvidencePreview,
+  getLineEvidence,
+  getSavedEvidenceDownload,
+  searchInvoiceNumbers,
+} from '../../api/controller';
 import { formatCurrency } from '../../utils/format';
 
 export const EVIDENCE_POLL_MS = 4000;
@@ -69,9 +78,38 @@ export function EvidenceCell({ evidence, entityName, onOpen, onFind, busy }) {
   );
 }
 
+// Invoice numbers mentioned by the line's matches and not searched yet.
+export function mentionedInvoices(candidates) {
+  const searched = new Set(candidates.flatMap((c) => c.signals?.invoiceNumbers || (c.signals?.invoiceNumber ? [c.signals.invoiceNumber] : [])).map((n) => n.toLowerCase()));
+  const out = [];
+  for (const c of candidates) {
+    for (const n of c.signals?.mentions || []) {
+      if (!searched.has(n.toLowerCase()) && !out.some((x) => x.toLowerCase() === n.toLowerCase())) out.push(n);
+    }
+  }
+  return out;
+}
+
+// The invoices found by number, and how far their totals cover the line.
+// { invoices: [{ number, total }], sum, missingTotals }
+export function invoiceSummary(candidates) {
+  const byNumber = new Map();
+  for (const c of candidates) {
+    const n = c.signals?.invoiceNumber;
+    if (!n) continue;
+    const cur = byNumber.get(n);
+    const total = c.signals.invoiceTotal ?? null;
+    if (!cur || (cur.total === null && total !== null)) byNumber.set(n, { number: n, total });
+  }
+  const invoices = [...byNumber.values()];
+  const sum = Math.round(invoices.reduce((s, i) => s + (i.total || 0), 0) * 100) / 100;
+  return { invoices, sum, missingTotals: invoices.filter((i) => i.total === null).length };
+}
+
 // What matched, as chips.
 export function signalLabels(signals, entityName, entityHintId) {
   const out = [];
+  if (signals.invoiceNumber) out.push(`Invoice ${signals.invoiceNumber}${signals.invoiceTotal !== null && signals.invoiceTotal !== undefined ? ` · total ${formatCurrency(signals.invoiceTotal)}` : ''}`);
   if (signals.amount) out.push('Amount matches');
   if (signals.vendor) out.push('Vendor matches');
   if (signals.days !== null && signals.days !== undefined) out.push(signals.days === 0 ? 'Same day' : `${signals.days} day${signals.days === 1 ? '' : 's'} apart`);
@@ -185,6 +223,23 @@ export function EvidenceDrawer({ groupId, runId, line, entityName, onClose, onCh
       setData(await findEvidence(groupId, runId, line.lineId));
       onChanged?.();
     });
+  const [invoiceInput, setInvoiceInput] = useState('');
+  const [invoiceResult, setInvoiceResult] = useState(null);
+  useEffect(() => {
+    setInvoiceInput('');
+    setInvoiceResult(null);
+  }, [line]);
+  const findInvoices = (numbers) =>
+    act('invoices', async () => {
+      const r = await searchInvoiceNumbers(groupId, runId, line.lineId, numbers);
+      setData(r);
+      setInvoiceResult({ found: r.foundNumbers, notFound: r.notFound, errors: r.errors });
+      setInvoiceInput('');
+      onChanged?.();
+    });
+  const mentions = mentionedInvoices(data?.candidates || []);
+  const invoices = invoiceSummary(data?.candidates || []);
+  const lineAmount = line ? Math.abs(Number(line.amount) || 0) : 0;
   const confirm = (c) =>
     act(`confirm-${c.candidateId}`, async () => {
       await confirmEvidence(groupId, runId, line.lineId, c.candidateId);
@@ -263,6 +318,55 @@ export function EvidenceDrawer({ groupId, runId, line, entityName, onClose, onCh
               Find Evidence
             </Button>
           </Box>
+
+          <Paper variant="outlined" sx={{ p: 1.5, mb: 1.5, bgcolor: 'background.default' }} data-testid="invoice-search">
+            <Typography variant="body2" fontWeight={600} sx={{ mb: 0.5 }}>
+              Invoices behind this payment
+            </Typography>
+            {mentions.length > 0 && (
+              <Box sx={{ display: 'flex', gap: 1, alignItems: 'center', flexWrap: 'wrap', mb: 1 }}>
+                <Typography variant="caption" color="text.secondary">
+                  A match mentions invoice{mentions.length === 1 ? '' : 's'} {mentions.join(', ')}.
+                </Typography>
+                <Button size="small" variant="contained" disabled={Boolean(busy)} onClick={() => findInvoices(mentions)}>
+                  Find invoice{mentions.length === 1 ? '' : 's'} {mentions.join(', ')}
+                </Button>
+              </Box>
+            )}
+            <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
+              <TextField
+                size="small"
+                label="Invoice numbers"
+                placeholder="4471, 4472, INV-4480"
+                value={invoiceInput}
+                onChange={(e) => setInvoiceInput(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && invoiceInput.trim() && findInvoices(invoiceInput)}
+                sx={{ flex: 1 }}
+              />
+              <Button size="small" variant="outlined" disabled={Boolean(busy) || !invoiceInput.trim()} onClick={() => findInvoices(invoiceInput)} startIcon={busy === 'invoices' ? <CircularProgress size={14} /> : null}>
+                Search
+              </Button>
+            </Box>
+            <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 0.5 }}>
+              Searches the opted-in mailboxes and invoice folders for these numbers, up to 18 months before the payment.
+            </Typography>
+            {invoiceResult && (
+              <Typography variant="caption" display="block" color={invoiceResult.notFound.length ? 'warning.main' : 'text.secondary'} sx={{ mt: 0.5 }}>
+                {invoiceResult.found.length ? `Found ${invoiceResult.found.join(', ')}.` : 'None found.'}
+                {invoiceResult.notFound.length ? ` Not found: ${invoiceResult.notFound.join(', ')}.` : ''}
+                {invoiceResult.errors?.length ? ` ${invoiceResult.errors[0]}` : ''}
+              </Typography>
+            )}
+            {invoices.invoices.length > 0 && (
+              <Typography variant="body2" sx={{ mt: 1 }} data-testid="invoice-total">
+                {invoices.invoices.length} invoice{invoices.invoices.length === 1 ? '' : 's'} found: {formatCurrency(invoices.sum)} of the{' '}
+                {formatCurrency(lineAmount)} payment
+                {invoices.missingTotals ? ` (${invoices.missingTotals} without a readable total)` : ''}
+                {!invoices.missingTotals && Math.abs(invoices.sum - lineAmount) < 0.01 ? ' ✓ adds up' : ''}
+              </Typography>
+            )}
+          </Paper>
+
           {data?.lastSearch && (
             <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 1 }}>
               Last searched {new Date(data.lastSearch.at).toLocaleString()} in {data.lastSearch.sources} source
