@@ -932,8 +932,8 @@ Resources:
         maxReceiveCount: 3
 
   # --- Phase 4b: invoice-folder index and saved support ---
-  # Saved support: private, encrypted, versioned, TLS only, never expires,
-  # never public. Read only through 5-minute signed links.
+  # Saved support: private, encrypted, versioned, TLS only, never expires
+  # (only AJE exports under aje-exports/ do), never public. Read only through 5-minute signed links.
   EvidenceBucket:
     Type: AWS::S3::Bucket
     DeletionPolicy: Retain
@@ -951,6 +951,14 @@ Resources:
         RestrictPublicBuckets: true
       VersioningConfiguration:
         Status: Enabled
+      # AJE report exports are one-off downloads, not records.
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireAjeExports
+            Status: Enabled
+            Prefix: aje-exports/
+            ExpirationInDays: 1
+            NoncurrentVersionExpirationInDays: 1
       OwnershipControls:
         Rules:
           - ObjectOwnership: BucketOwnerEnforced
@@ -1253,6 +1261,79 @@ Resources:
             RestApiId: !Ref ApohcoDashboardApi
             Path: /api/controller/trends
             Method: get
+
+  # Phase 5a: recommended adjusting entries. Reads saved support and writes
+  # report exports (aje-exports/, expired after a day) in the evidence
+  # bucket; no Google or QuickBooks access.
+  CtrlAjeFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: ctrlAje
+      Handler: src/functions/controller/ctrlAje/index.handler
+      MemorySize: 1024
+      Timeout: 29
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: secretsmanager:GetSecretValue
+              Resource:
+                - !Ref DbCredentialsSecretArn
+                - !Ref AppSecretsArn
+            - Effect: Allow
+              Action: s3:GetObject
+              Resource: !Sub ${EvidenceBucket.Arn}/*
+            - Effect: Allow
+              Action: s3:PutObject
+              Resource: !Sub ${EvidenceBucket.Arn}/aje-exports/*
+        - VPCAccessPolicy: {}
+      Environment:
+        Variables:
+          COGNITO_USER_POOL_ID: !Ref ApohcoUserPool
+          COGNITO_CLIENT_ID: !Ref ApohcoUserPoolClient
+          EVIDENCE_BUCKET: !Ref EvidenceBucket
+      Events:
+        Overview:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/controller/aje
+            Method: get
+        Settings:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/controller/aje/settings
+            Method: put
+        Draft:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/controller/aje/draft
+            Method: get
+        Publish:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/controller/aje/reports
+            Method: post
+        Report:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/controller/aje/reports/{reportId}
+            Method: get
+        Export:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/controller/aje/reports/{reportId}/export
+            Method: post
+        CheckPosted:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/controller/aje/check-posted
+            Method: post
 
   ManageCtrlVendorsFunction:
     Type: AWS::Serverless::Function

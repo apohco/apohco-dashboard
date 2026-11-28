@@ -11,6 +11,7 @@ const { fingerprintLines, snapshotHash } = require('../../../shared/ledgerFinger
 const { parseMonth, monthsBetween } = require('../../../shared/monthRanges');
 const { insertRows } = require('../../../shared/bulkInsert');
 const { recordAudit } = require('../../../shared/audit');
+const { checkPostingsSafely } = require('../../../shared/ajeData');
 
 // Same cap as an API pull (startCtrlSync).
 const MAX_MONTHS_PER_UPLOAD = 36;
@@ -305,6 +306,8 @@ async function handleImport(claims, uploadId, body) {
   });
 
   await deleteObject(upload.s3key).catch((err) => console.error('Could not delete uploaded GL file:', err.message));
+  // Entries the accountant has booked since (their AJE number in Num or memo).
+  for (const snap of stored) await checkPostingsSafely({ groupId: upload.groupid, qboId: upload.qboid, snapshotId: snap.snapshotId });
 
   return json(200, {
     uploadId,

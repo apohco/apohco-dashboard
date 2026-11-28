@@ -10,6 +10,7 @@ const { fingerprintLines, snapshotHash } = require('../../../shared/ledgerFinger
 const { monthBounds } = require('../../../shared/monthRanges');
 const { insertRows } = require('../../../shared/bulkInsert');
 const { recordAudit } = require('../../../shared/audit');
+const { checkPostingsSafely } = require('../../../shared/ajeData');
 
 // Must match maxReceiveCount on the queue's redrive policy (template.yaml).
 const MAX_ATTEMPTS = 3;
@@ -175,6 +176,8 @@ async function processTask(taskId) {
 
   try {
     const result = await pullMonth(task);
+    // Entries the accountant has booked since (their AJE number in Num or memo).
+    if (result.snapshotId) result.ajePosted = await checkPostingsSafely({ groupId: task.groupid, qboId: task.qboid, snapshotId: result.snapshotId });
     return { taskId, ...result };
   } catch (err) {
     const message = describeError(err);

@@ -187,3 +187,33 @@ export const startEvidenceSearch = (groupId, body) =>
 
 export const getEvidenceJob = (groupId, jobId) =>
   apiClient.get(`/api/controller/evidence/jobs/${jobId}`, { params: { groupId } }).then((r) => r.data);
+
+// AJE reports (Phase 5a): recommended adjusting entries. Nothing is
+// written to QuickBooks; the accountant books them.
+export const getAjeOverview = (groupId) =>
+  apiClient.get('/api/controller/aje', { params: { groupId } }).then((r) => r.data);
+
+// body: { defaultGrouping?, files?: [{ qboId, fileCode }] }
+export const saveAjeSettings = (groupId, body) =>
+  apiClient.put('/api/controller/aje/settings', { groupId, ...body }).then((r) => r.data);
+
+export const getAjeDraft = (groupId, { qboId, month, grouping, reviseReportId } = {}) =>
+  apiClient
+    .get('/api/controller/aje/draft', {
+      params: { groupId, qboId, month, ...(grouping ? { grouping } : {}), ...(reviseReportId ? { reviseReportId } : {}) },
+    })
+    .then((r) => r.data);
+
+// body: { qboId, month, grouping, expectedKeys, include: [{ key, memo? }], reviseReportId?, note? }
+export const publishAjeReport = (groupId, body) =>
+  apiClient.post('/api/controller/aje/reports', { groupId, ...body }).then((r) => r.data);
+
+export const getAjeReport = (groupId, reportId) =>
+  apiClient.get(`/api/controller/aje/reports/${reportId}`, { params: { groupId } }).then((r) => r.data);
+
+// format: 'pdf' | 'xlsx'. Returns { url, fileName } (a 5-minute link).
+export const exportAjeReport = (groupId, reportId, format, includeSupport = true) =>
+  apiClient.post(`/api/controller/aje/reports/${reportId}/export`, { groupId, format, includeSupport }).then((r) => r.data);
+
+export const checkAjePosted = (groupId, qboId) =>
+  apiClient.post('/api/controller/aje/check-posted', { groupId, qboId }).then((r) => r.data);

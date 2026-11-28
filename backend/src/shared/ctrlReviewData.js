@@ -115,6 +115,7 @@ async function loadEntities(groupId) {
     managementClassName: r.managementclassname,
     aliases: r.aliases || [],
     keywords: r.keywords || [],
+    practiceQboId: r.practiceqboid || null,
   }));
 }
 

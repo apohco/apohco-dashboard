@@ -25,6 +25,7 @@ import VendorProfile from '../pages/Controller/VendorProfile';
 import Conflicts from '../pages/Controller/Conflicts';
 import Trends from '../pages/Controller/Trends';
 import GoogleWorkspace from '../pages/Controller/GoogleWorkspace';
+import AjeReports from '../pages/Controller/AjeReports';
 
 export default function AppRoutes() {
   return (
@@ -56,6 +57,7 @@ export default function AppRoutes() {
             <Route path="controller/vendors/:vendorId" element={<VendorProfile />} />
             <Route path="controller/trends" element={<Trends />} />
             <Route path="controller/google" element={<GoogleWorkspace />} />
+            <Route path="controller/aje" element={<AjeReports />} />
           </Route>
           <Route path="*" element={<Navigate to="/financial/profit-and-loss" replace />} />
         </Route>

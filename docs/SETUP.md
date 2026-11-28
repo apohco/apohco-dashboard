@@ -594,6 +594,59 @@ admin's evidence folders. The deploy adds:
   of the payment the invoices found add up to. An ordinary Find Evidence
   leaves invoices found by number in place.
 
+### 9.12 AJE reports (Phase 5a)
+
+Deploy: `npm run db:migrate` applies `016_controller_aje.sql`. It adds file
+codes (`CtrlAjeFileSettings`), the default grouping (`CtrlAjeSettings`),
+reports, entries and their backup lines (`CtrlAjeReports`, `CtrlAjeEntries`,
+`CtrlAjeEntrySources`) and posted-checks (`CtrlAjePostings`). Reports can't
+be deleted or renumbered, and entries can't be edited; the only change a
+report allows is being marked superseded. The deploy adds:
+
+- `ctrlAje`, with the routes `/api/controller/aje`, `/aje/settings`,
+  `/aje/draft`, `/aje/reports`, `/aje/reports/{reportId}[/export]` and
+  `/aje/check-posted`. It can read saved support and write exports under
+  `aje-exports/` in the evidence bucket. It has no Google or QuickBooks
+  access.
+- A lifecycle rule on the evidence bucket that removes `aje-exports/` after a
+  day. Saved support is never expired.
+
+How it works:
+
+- **Controller → AJE reports**: pick a file and a month (months with
+  decisions are listed). The draft turns your decisions into recommended
+  entries, dated the last day of the month:
+  - **Class change**: same account, debit the new class, credit the old one.
+    A split gives one debit per entity.
+  - **Reclassify**: debit the new account, credit the old one.
+  - **Due To/From**: debit the Due To/From account, credit the original
+    account. The other entity's file also gets the other side (debit the
+    expense, credit "Due To <your entity>") when that file and its Due To
+    account are known; otherwise the entry is flagged.
+  - Relabeled history is included only where "request AJE" was ticked.
+  - Lines already covered by a published report are left out. If you change
+    or undo a decision after publishing, the next draft moves the line from
+    where the published entry put it, or reverses that entry.
+- **Grouped** (the default, set in Settings) combines lines with the same
+  vendor and the same move into one entry. **Per line** makes one entry per
+  transaction. Flagged entries (for example an entity with no QuickBooks
+  class) can't be published until they're fixed. Untick an entry to leave it
+  for a later report. Memos can be edited; the entry number is always put in
+  front of the memo.
+- **Numbers**: `FILE-YYYY-MM-AJE-###`, with entries `.01`, `.02` and so on.
+  The file code (MGMT, WPD, …) is set in Settings and fixed once a report
+  uses it. A QuickBooks journal entry's Num holds at most 21 characters, so
+  each entry also has a short **QBO Num** (`MGMT-2610-AJE001.03`). **Revise…**
+  (latest report of a month only) builds a fresh draft, publishes it with the
+  next number, and marks the old report "Superseded by …".
+- **Exports**: Excel (Entries, Backup and Support sheets) or PDF. The PDF
+  includes the saved support PDFs after the entries. Each is a 5-minute
+  download link.
+- **Posted (seen in GL)**: each GL pull or upload looks for entry numbers in
+  its Num and memo columns, in either form. A report number on its own marks
+  every entry in that report. **Check GL now** re-checks the stored months.
+  This only reads the stored GL; it never writes to QuickBooks.
+
 ## 10. Before Phase 4: Google Workspace (Gmail and Drive evidence)
 
 Phase 4 searches Gmail and Drive for invoices and receipts that support a
