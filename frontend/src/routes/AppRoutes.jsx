@@ -1,4 +1,4 @@
-import { Routes, Route, Navigate } from 'react-router-dom';
+import { Routes, Route } from 'react-router-dom';
 import Layout from '../components/layout/Layout';
 import RequireAuth from '../components/auth/RequireAuth';
 import Login from '../pages/Login';
@@ -26,6 +26,11 @@ import Conflicts from '../pages/Controller/Conflicts';
 import Trends from '../pages/Controller/Trends';
 import GoogleWorkspace from '../pages/Controller/GoogleWorkspace';
 import AjeReports from '../pages/Controller/AjeReports';
+import AjeActivity from '../pages/Controller/AjeActivity';
+import Accountants from '../pages/Controller/Accountants';
+import PortalReports from '../pages/Portal/PortalReports';
+import PortalReport from '../pages/Portal/PortalReport';
+import { HomeRedirect, RequireAccountant, RequireDashboard } from '../components/auth/RoleGuards';
 
 export default function AppRoutes() {
   return (
@@ -33,33 +38,41 @@ export default function AppRoutes() {
       <Route path="login" element={<Login />} />
       <Route element={<RequireAuth />}>
         <Route element={<Layout />}>
-          <Route index element={<Navigate to="/financial/profit-and-loss" replace />} />
-          <Route path="financial/profit-and-loss" element={<ProfitAndLossReport />} />
-          <Route path="financial/balance-sheet" element={<BalanceSheetReport />} />
-          <Route path="financial/cash-flow" element={<CashFlowReport />} />
-          <Route path="settings" element={<SettingsHome />} />
-          <Route path="settings/groups" element={<ManageGroups />} />
-          <Route path="settings/qbo-setup" element={<QBOSetup />} />
-          <Route path="settings/chart-of-accounts" element={<ChartOfAccountsSetup />} />
-          <Route path="settings/consolidation-groups" element={<ConsolidationGroups />} />
-          <Route path="settings/qbo-data-sync" element={<QBODataSync />} />
-          <Route path="settings/report-layout" element={<ReportLayout />} />
-          <Route path="settings/users" element={<UserManagement />} />
+          <Route index element={<HomeRedirect />} />
           <Route path="profile" element={<MyProfile />} />
-          <Route element={<RequireControllerOwner />}>
-            <Route path="controller" element={<ControllerOverview />} />
-            <Route path="controller/ledger" element={<LedgerBrowser />} />
-            <Route path="controller/entities" element={<EntitiesSetup />} />
-            <Route path="controller/upload" element={<GlUpload />} />
-            <Route path="controller/review" element={<ReviewQueue />} />
-            <Route path="controller/conflicts" element={<Conflicts />} />
-            <Route path="controller/vendors" element={<Vendors />} />
-            <Route path="controller/vendors/:vendorId" element={<VendorProfile />} />
-            <Route path="controller/trends" element={<Trends />} />
-            <Route path="controller/google" element={<GoogleWorkspace />} />
-            <Route path="controller/aje" element={<AjeReports />} />
+          <Route element={<RequireAccountant />}>
+            <Route path="portal" element={<PortalReports />} />
+            <Route path="portal/reports/:reportId" element={<PortalReport />} />
           </Route>
-          <Route path="*" element={<Navigate to="/financial/profit-and-loss" replace />} />
+          <Route element={<RequireDashboard />}>
+            <Route path="financial/profit-and-loss" element={<ProfitAndLossReport />} />
+            <Route path="financial/balance-sheet" element={<BalanceSheetReport />} />
+            <Route path="financial/cash-flow" element={<CashFlowReport />} />
+            <Route path="settings" element={<SettingsHome />} />
+            <Route path="settings/groups" element={<ManageGroups />} />
+            <Route path="settings/qbo-setup" element={<QBOSetup />} />
+            <Route path="settings/chart-of-accounts" element={<ChartOfAccountsSetup />} />
+            <Route path="settings/consolidation-groups" element={<ConsolidationGroups />} />
+            <Route path="settings/qbo-data-sync" element={<QBODataSync />} />
+            <Route path="settings/report-layout" element={<ReportLayout />} />
+            <Route path="settings/users" element={<UserManagement />} />
+            <Route element={<RequireControllerOwner />}>
+              <Route path="controller" element={<ControllerOverview />} />
+              <Route path="controller/ledger" element={<LedgerBrowser />} />
+              <Route path="controller/entities" element={<EntitiesSetup />} />
+              <Route path="controller/upload" element={<GlUpload />} />
+              <Route path="controller/review" element={<ReviewQueue />} />
+              <Route path="controller/conflicts" element={<Conflicts />} />
+              <Route path="controller/vendors" element={<Vendors />} />
+              <Route path="controller/vendors/:vendorId" element={<VendorProfile />} />
+              <Route path="controller/trends" element={<Trends />} />
+              <Route path="controller/google" element={<GoogleWorkspace />} />
+              <Route path="controller/aje" element={<AjeReports />} />
+              <Route path="controller/aje-activity" element={<AjeActivity />} />
+              <Route path="controller/accountants" element={<Accountants />} />
+            </Route>
+          </Route>
+          <Route path="*" element={<HomeRedirect />} />
         </Route>
       </Route>
     </Routes>

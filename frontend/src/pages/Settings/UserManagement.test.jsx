@@ -22,6 +22,9 @@ describe('availableActions', () => {
     expect(availableActions(paul)).toEqual([]);
     expect(availableActions({ ...drv, isProtected: true })).toEqual([]);
   });
+  test('nothing for an accountant portal login (managed in Controller > Accountants)', () => {
+    expect(availableActions({ ...base, username: 'cpa', role: 'Accountant', isAccountant: true })).toEqual([]);
+  });
   test('invited users get "resend invite"; active users get password reset', () => {
     expect(availableActions(invited)).toEqual(['resend-invite', 'disable']);
     expect(availableActions({ ...drv, mfaEnabled: true })).toEqual(['reset-password', 'reset-mfa', 'disable']);

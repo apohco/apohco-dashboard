@@ -8,12 +8,12 @@
 // GET  /api/controller/aje/reports/{reportId}?groupId=
 // POST /api/controller/aje/reports/{reportId}/export     { groupId, format: 'pdf' | 'xlsx', includeSupport? }
 // POST /api/controller/aje/check-posted                  { groupId, qboId } -- look for booked entries in the stored GLs
+// GET  /api/controller/aje/rollup?groupId=               accountant portal rollup: status counts, open questions, activity
+// POST /api/controller/aje/entries/{entryId}/comments    { groupId, body } -- answer an accountant's question
 //
 // Nothing here writes to QuickBooks: entries are recommendations the
 // accountant books. Exports are written to the private evidence bucket
 // (aje-exports/, removed after a day) and handed out as 5-minute links.
-const { S3Client, PutObjectCommand, GetObjectCommand } = require('@aws-sdk/client-s3');
-const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const { authorizeController } = require('../../../shared/controllerAuth');
 const { requireGroupAccess } = require('../../../shared/authorize');
 const { query, withTransaction } = require('../../../shared/db');
@@ -23,16 +23,9 @@ const { parseMonth } = require('../../../shared/monthRanges');
 const { badRequest, isUuid, loadEntities } = require('../../../shared/ctrlReviewData');
 const B = require('../../../shared/ajeBuilder');
 const data = require('../../../shared/ajeData');
-const { buildXlsx, buildPdf, exportFileName } = require('../../../shared/ajeExport');
-
-const LINK_SECONDS = 300;
-const EXPORT_PREFIX = 'aje-exports';
-
-let s3 = null;
-const getS3 = () => {
-  if (!s3) s3 = new S3Client({});
-  return s3;
-};
+const { exportReport } = require('../../../shared/ajeExportService');
+const portal = require('../../../shared/portalData');
+const { notifyReportPublished, notifyReply } = require('../../../shared/ctrlNotify');
 
 const requireMonth = (month) => {
   if (!month || !parseMonth(month)) throw badRequest('month must be formatted YYYY-MM');
@@ -123,81 +116,44 @@ async function handlePublish(claims, body) {
       },
       client
     );
+    const file = await data.loadFile(body.groupId, body.qboId, client);
+    await notifyReportPublished(client, {
+      groupId: body.groupId, qboId: body.qboId, reportId: r.reportId, reportNumber: r.reportNumber, qboName: file.qboname,
+      month: body.month, entryCount: r.entryCount, supersedes: r.supersedes,
+    });
     return r;
   });
   return json(201, result);
 }
 
-async function readObject(key) {
-  const { Body } = await getS3().send(new GetObjectCommand({ Bucket: process.env.EVIDENCE_BUCKET, Key: key }));
-  const chunks = [];
-  for await (const c of Body) chunks.push(c);
-  return Buffer.concat(chunks);
-}
-
-// Saved support PDFs for a report, in entry order (with their S3 keys).
-async function loadSupportFiles(groupId, report) {
-  const ids = [...new Set(report.entries.flatMap((e) => e.support.map((s) => s.savedId)))];
-  if (!ids.length) return [];
-  const { rows } = await query(
-    `SELECT SavedId, S3Key, FileName, SizeBytes FROM CtrlEvidenceSaved WHERE GroupId = $1 AND SavedId = ANY($2::uuid[]) AND Status = 'Saved'`,
-    [groupId, ids]
-  );
-  const byId = new Map(rows.map((r) => [r.savedid, r]));
-  const out = [];
-  const done = new Set();
-  for (const e of report.entries) {
-    for (const s of e.support) {
-      const row = byId.get(s.savedId);
-      if (!row || done.has(s.savedId) || !/\.pdf$/i.test(row.filename || '')) continue;
-      done.add(s.savedId);
-      out.push({ entryNumber: e.entryNumber, fileName: row.filename, s3Key: row.s3key });
-    }
-  }
-  return out;
-}
-
 async function handleExport(claims, groupId, reportId, body) {
-  const format = body.format;
-  if (!['pdf', 'xlsx'].includes(format)) throw badRequest('format must be pdf or xlsx');
-  if (!process.env.EVIDENCE_BUCKET) throw new Error('EVIDENCE_BUCKET is not set');
   const report = await data.loadReport(groupId, reportId);
-  let buffer;
-  let contentType;
-  let supportIncluded = 0;
-  if (format === 'xlsx') {
-    buffer = buildXlsx(report);
-    contentType = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
-  } else {
-    const support = [];
-    if (body.includeSupport !== false) {
-      for (const s of await loadSupportFiles(groupId, report)) {
-        try {
-          support.push({ ...s, data: await readObject(s.s3Key) });
-        } catch (err) {
-          console.error('AJE export: support file unreadable', err.message);
-        }
-      }
-    }
-    supportIncluded = support.length;
-    buffer = await buildPdf(report, { support });
-    contentType = 'application/pdf';
-  }
-  const fileName = exportFileName(report, format);
-  const key = `${EXPORT_PREFIX}/${groupId}/${reportId}/${Date.now()}-${format}.${format}`;
-  await getS3().send(new PutObjectCommand({
-    Bucket: process.env.EVIDENCE_BUCKET, Key: key, Body: buffer, ContentType: contentType, ServerSideEncryption: 'AES256',
-  }));
-  const url = await getSignedUrl(
-    getS3(),
-    new GetObjectCommand({ Bucket: process.env.EVIDENCE_BUCKET, Key: key, ResponseContentDisposition: `attachment; filename="${fileName.replace(/"/g, '')}"` }),
-    { expiresIn: LINK_SECONDS }
-  );
+  const result = await exportReport({ groupId, report, format: body.format, includeSupport: body.includeSupport });
   await recordAudit({
     groupId, userId: claims.userId, action: 'ctrl.aje.export', targetType: 'CtrlAjeReport', targetId: reportId,
-    details: { format, bytes: buffer.length, supportIncluded },
+    details: { format: body.format, bytes: result.bytes, supportIncluded: result.supportIncluded },
   });
-  return json(200, { url, fileName, expiresInSeconds: LINK_SECONDS, supportIncluded });
+  const { bytes, ...out } = result;
+  return json(200, out);
+}
+
+async function handleReport(groupId, reportId) {
+  return json(200, await portal.attachPortalState(groupId, await data.loadReport(groupId, reportId)));
+}
+
+async function handleReply(claims, groupId, entryId, body) {
+  const entry = await portal.entryForAccountant(null, entryId);
+  if (entry.groupId !== groupId) throw badRequest('Entry not found', 404);
+  const comment = await withTransaction(async (client) => {
+    const c = await portal.addComment(client, { entry, body: body.body, userId: claims.userId, userName: claims.username || 'Controller', role: 'Controller' });
+    await recordAudit({
+      groupId, userId: claims.userId, action: 'ctrl.aje.reply', targetType: 'CtrlAjeEntry', targetId: entryId,
+      details: { entryNumber: entry.entryNumber, commentId: c.commentId, length: c.body.length },
+    }, client);
+    await notifyReply(client, { groupId, entry, body: c.body });
+    return c;
+  });
+  return json(201, comment);
 }
 
 async function handleCheckPosted(claims, body) {
@@ -232,8 +188,10 @@ exports.handler = withErrorHandling(async (event) => {
   if (method === 'PUT' && resource === '/api/controller/aje/settings') return handleSettings(claims, body);
   if (method === 'GET' && resource === '/api/controller/aje/draft') return handleDraft(groupId, qs);
   if (method === 'POST' && resource === '/api/controller/aje/reports') return handlePublish(claims, body);
-  if (method === 'GET' && resource === '/api/controller/aje/reports/{reportId}') return json(200, await data.loadReport(groupId, reportId));
+  if (method === 'GET' && resource === '/api/controller/aje/reports/{reportId}') return handleReport(groupId, reportId);
   if (method === 'POST' && resource === '/api/controller/aje/reports/{reportId}/export') return handleExport(claims, groupId, reportId, body);
   if (method === 'POST' && resource === '/api/controller/aje/check-posted') return handleCheckPosted(claims, body);
+  if (method === 'GET' && resource === '/api/controller/aje/rollup') return json(200, await portal.loadRollup(groupId));
+  if (method === 'POST' && resource === '/api/controller/aje/entries/{entryId}/comments') return handleReply(claims, groupId, event.pathParameters?.entryId, body);
   throw badRequest('Unknown AJE route', 404);
 });

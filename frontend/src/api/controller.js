@@ -217,3 +217,32 @@ export const exportAjeReport = (groupId, reportId, format, includeSupport = true
 
 export const checkAjePosted = (groupId, qboId) =>
   apiClient.post('/api/controller/aje/check-posted', { groupId, qboId }).then((r) => r.data);
+
+// ---- Accountant portal, controller side (Phase 5b)
+
+export const getAjeRollup = (groupId) =>
+  apiClient.get('/api/controller/aje/rollup', { params: { groupId } }).then((r) => r.data);
+
+export const replyToAjeEntry = (groupId, entryId, body) =>
+  apiClient.post(`/api/controller/aje/entries/${entryId}/comments`, { groupId, body }).then((r) => r.data);
+
+export const getAccountants = (groupId) =>
+  apiClient.get('/api/controller/accountants', { params: { groupId } }).then((r) => r.data);
+
+// body: { fullName, email, username, firm?, qboIds: null (all files) | [...], notifyByEmail }
+export const inviteAccountant = (groupId, body) =>
+  apiClient.post('/api/controller/accountants', { groupId, ...body }).then((r) => r.data);
+
+// body: { fullName?, email?, firm?, notifyByEmail?, qboIds?, access?: false }
+export const updateAccountant = (groupId, accountantId, body) =>
+  apiClient.put(`/api/controller/accountants/${accountantId}`, { groupId, ...body }).then((r) => r.data);
+
+// action: deactivate | reactivate | resend-invite | reset-password | reset-mfa
+export const accountantAction = (groupId, accountantId, action) =>
+  apiClient.post(`/api/controller/accountants/${accountantId}/${action}`, { groupId }).then((r) => r.data);
+
+export const saveAccountantNotifySettings = (groupId, body) =>
+  apiClient.put('/api/controller/accountant-settings', { groupId, ...body }).then((r) => r.data);
+
+export const sendAccountantNotifyTest = (groupId) =>
+  apiClient.post('/api/controller/accountant-settings/test', { groupId }).then((r) => r.data);

@@ -6,7 +6,8 @@
 // signed here with Node's crypto (no googleapis dependency) and cached per
 // subject + scopes until shortly before they expire.
 //
-// Read-only except drive.file (the app's own evidence folder, Phase 4b).
+// Read-only except drive.file (the app's own evidence folder, Phase 4b)
+// and gmail.send (portal notification emails, Phase 5b; ctrlNotifyWorker only).
 // Callers must check the source allowlist before calling (ctrlGoogle /
 // ctrlEvidence do, server-side).
 const crypto = require('crypto');
@@ -19,6 +20,8 @@ const SCOPES = {
   driveRead: 'https://www.googleapis.com/auth/drive.readonly',
   driveFile: 'https://www.googleapis.com/auth/drive.file',
   directory: 'https://www.googleapis.com/auth/admin.directory.user.readonly',
+  // Portal notifications only (ctrlNotifyWorker): send as the admin mailbox.
+  gmailSend: 'https://www.googleapis.com/auth/gmail.send',
 };
 const TIMEOUT_MS = 15000;
 const MAX_DOWNLOAD_BYTES = 25 * 1024 * 1024;
@@ -284,6 +287,12 @@ async function gmailGetMessage(mailbox, id, { format = 'full', http } = {}) {
   return get(`${gmailBase(mailbox)}/messages/${encodeURIComponent(id)}`, mailbox, ['gmail'], params, { http });
 }
 
+// Sends one message (base64url RFC 2822, see ctrlNotify.buildRawEmail) from
+// `mailbox`. Needs the gmail.send scope in the domain-wide delegation.
+async function gmailSend(mailbox, raw, { http } = {}) {
+  return send('POST', `${gmailBase(mailbox)}/messages/send`, mailbox, ['gmailSend'], { raw }, { http, headers: { 'Content-Type': 'application/json' } });
+}
+
 // ---- Directory and shared drives (acting as the workspace admin)
 
 async function listDirectoryUsers(adminEmail, { http } = {}) {
@@ -360,6 +369,7 @@ module.exports = {
   getAccessToken,
   gmailSearch,
   gmailGetMessage,
+  gmailSend,
   listDirectoryUsers,
   listSharedDrives,
   testConnection,

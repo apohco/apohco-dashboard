@@ -68,6 +68,8 @@ function shapeUser(cognitoUser, { mfaEnabled, controllerOwners, groupNames, clai
     // never from this screen: an admin who could change its email and send
     // a reset could take over the account with access to company email.
     isProtected: isControllerOwner,
+    // Managed in Controller > Accountants, not here.
+    isAccountant: attrs['custom:role'] === 'Accountant',
   };
 }
 
@@ -112,6 +114,11 @@ async function loadTarget(username, claims, { allowSelf = true } = {}) {
   const controllerOwners = await cognito.listUsernamesInGroup(CONTROLLER_COGNITO_GROUP);
   if (controllerOwners.has(user.Username.toLowerCase())) {
     throw httpError(403, 'This account is protected and can only be changed from the AWS CLI');
+  }
+  // Accountant logins carry portal access that lives in CtrlAccountants;
+  // changing them here (e.g. promoting one to Owner) would bypass that.
+  if (cognito.attrMap(user.UserAttributes)['custom:role'] === 'Accountant') {
+    throw httpError(409, 'This is an accountant portal login; manage it in Controller > Accountants');
   }
   if (!allowSelf && sameUser(user.Username, claims.username)) {
     throw httpError(400, "You can't do that to your own account");

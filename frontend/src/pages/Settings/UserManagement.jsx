@@ -76,7 +76,7 @@ const errorText = (err) => err?.response?.data?.message || err?.message;
 
 // Which actions make sense for a user right now.
 export function availableActions(user) {
-  if (user.isSelf || user.isProtected) return [];
+  if (user.isSelf || user.isProtected || user.isAccountant) return [];
   if (!user.enabled) return ['enable'];
   const actions = [];
   if (user.status === 'FORCE_CHANGE_PASSWORD') actions.push('resend-invite');
@@ -247,6 +247,11 @@ export default function UserManagement() {
                     <TableCell>
                       {u.username}
                       {u.isSelf && <Chip size="small" label="You" sx={{ ml: 1 }} />}
+                      {u.isAccountant && (
+                        <Tooltip title="Accountant portal login: manage it in Controller > Accountants">
+                          <Chip size="small" variant="outlined" label="AJE portal" sx={{ ml: 1 }} />
+                        </Tooltip>
+                      )}
                       {u.isProtected && (
                         <Tooltip title="Protected account: can only be changed from the AWS CLI">
                           <LockOutlinedIcon fontSize="inherit" sx={{ ml: 1, verticalAlign: 'middle' }} aria-label="protected account" />
@@ -273,7 +278,7 @@ export default function UserManagement() {
                     </TableCell>
                     <TableCell>{u.mfaEnabled === null ? '—' : u.mfaEnabled ? 'Set up' : 'Not yet'}</TableCell>
                     <TableCell align="right" sx={{ whiteSpace: 'nowrap' }}>
-                      {!u.isSelf && !u.isProtected && u.enabled && (
+                      {!u.isSelf && !u.isProtected && !u.isAccountant && u.enabled && (
                         <Button size="small" onClick={() => setDialog({ open: true, user: u })}>
                           Edit
                         </Button>

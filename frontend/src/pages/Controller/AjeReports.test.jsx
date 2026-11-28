@@ -12,6 +12,7 @@ vi.mock('../../api/controller', () => ({
   checkAjePosted: vi.fn(),
   saveAjeSettings: vi.fn(),
   getSavedEvidenceDownload: vi.fn(),
+  replyToAjeEntry: vi.fn(),
 }));
 vi.mock('../../api/settings', () => ({ listGroups: vi.fn() }));
 
@@ -133,6 +134,31 @@ describe('AJE reports page', () => {
     await waitFor(() => expect(api.getAjeDraft).toHaveBeenLastCalledWith('g1', { qboId: 'mgmt', month: '2026-10', grouping: 'Grouped', reviseReportId: 'r1' }));
     expect(screen.getByText('Revise MGMT-2026-10-AJE-001')).toBeInTheDocument();
     open.mockRestore();
+  });
+
+  test("a report shows the accountant's status and question, and the controller can reply", async () => {
+    const detail = (thread) => ({
+      ...OVERVIEW.reports[0], qboName: 'APOHCO Management', grouping: 'Grouped', note: null,
+      entries: [{
+        entryId: 'e1', entryNumber: 'MGMT-2026-10-AJE-001.01', qboNum: 'MGMT-2610-AJE001.01', kind: 'ClassMove', kindLabel: 'Class change', vendor: 'Kroger',
+        entryDate: '2026-10-31', memo: 'm', amount: 150, warnings: [], lines: ENTRY('x').lines, posted: null, sources: ENTRY('x').sources, support: [],
+        portal: { status: 'Declined', statusLabel: 'Declined', reason: 'Wrong period', setBy: 'Casey', questionOpen: true, comments: 1 },
+        thread,
+      }],
+    });
+    const question = { commentId: 'c1', authorName: 'Casey', authorRole: 'Accountant', body: 'Is this October?', createdAt: '2026-11-27' };
+    api.getAjeReport.mockResolvedValueOnce(detail([question])).mockResolvedValueOnce(detail([question, { ...question, commentId: 'c2', authorName: 'paul', authorRole: 'Controller', body: 'Yes.' }]));
+    api.replyToAjeEntry.mockResolvedValue({});
+    renderPage();
+    await userEvent.click(await screen.findByRole('button', { name: 'MGMT-2026-10-AJE-001' }));
+    const dialog = await screen.findByRole('dialog');
+    expect(await within(dialog).findByText('Accountant: Declined')).toBeInTheDocument();
+    expect(within(dialog).getByText('Question open')).toBeInTheDocument();
+    expect(within(dialog).getByText(/Declined by Casey: Wrong period/)).toBeInTheDocument();
+    await userEvent.type(within(dialog).getByRole('textbox', { name: 'Comment on MGMT-2026-10-AJE-001.01' }), 'Yes.');
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Reply' }));
+    await waitFor(() => expect(api.replyToAjeEntry).toHaveBeenCalledWith('g1', 'e1', 'Yes.'));
+    expect(await within(dialog).findByText('Yes.')).toBeInTheDocument();
   });
 
   test('settings save file codes and the default grouping', async () => {

@@ -27,6 +27,8 @@ import CompareArrowsOutlinedIcon from '@mui/icons-material/CompareArrowsOutlined
 import InsightsOutlinedIcon from '@mui/icons-material/InsightsOutlined';
 import CloudOutlinedIcon from '@mui/icons-material/CloudOutlined';
 import ReceiptLongOutlinedIcon from '@mui/icons-material/ReceiptLongOutlined';
+import ForumOutlinedIcon from '@mui/icons-material/ForumOutlined';
+import BadgeOutlinedIcon from '@mui/icons-material/BadgeOutlined';
 import { useAuth } from '../../context/AuthContext';
 
 export const SIDEBAR_WIDTH = 240;
@@ -36,6 +38,9 @@ const financialItems = [
   { label: 'Balance Sheet', path: '/financial/balance-sheet', icon: <AccountBalanceOutlinedIcon fontSize="small" /> },
   { label: 'Cash Flow', path: '/financial/cash-flow', icon: <SwapVertOutlinedIcon fontSize="small" /> },
 ];
+
+// Accountant logins see only this (the API enforces the same rule).
+const portalItems = [{ label: 'Reports', path: '/portal', icon: <ReceiptLongOutlinedIcon fontSize="small" /> }];
 
 // Shown only to the ControllerOwner (the API enforces the same rule).
 const controllerItems = [
@@ -47,6 +52,8 @@ const controllerItems = [
   { label: 'Vendors', path: '/controller/vendors', icon: <StorefrontOutlinedIcon fontSize="small" /> },
   { label: 'Trends', path: '/controller/trends', icon: <InsightsOutlinedIcon fontSize="small" /> },
   { label: 'AJE reports', path: '/controller/aje', icon: <ReceiptLongOutlinedIcon fontSize="small" /> },
+  { label: 'Accountant activity', path: '/controller/aje-activity', icon: <ForumOutlinedIcon fontSize="small" /> },
+  { label: 'Accountants', path: '/controller/accountants', icon: <BadgeOutlinedIcon fontSize="small" /> },
   { label: 'Entities', path: '/controller/entities', icon: <ApartmentOutlinedIcon fontSize="small" /> },
   { label: 'Google Workspace', path: '/controller/google', icon: <CloudOutlinedIcon fontSize="small" /> },
 ];
@@ -81,7 +88,7 @@ function NavSection({ label, icon, items, open, onToggle }) {
 }
 
 export default function Sidebar() {
-  const { isControllerOwner } = useAuth();
+  const { isControllerOwner, isAccountant } = useAuth();
   const [financialOpen, setFinancialOpen] = useState(true);
   const [controllerOpen, setControllerOpen] = useState(true);
 
@@ -102,21 +109,27 @@ export default function Sidebar() {
       <Toolbar />
       <Box sx={{ overflow: 'auto', py: 1 }}>
         <List component="nav" dense>
-          <NavSection
-            label="Financial"
-            icon={<AssessmentOutlinedIcon fontSize="small" />}
-            items={financialItems}
-            open={financialOpen}
-            onToggle={() => setFinancialOpen((v) => !v)}
-          />
-          {isControllerOwner && (
-            <NavSection
-              label="Controller"
-              icon={<FactCheckOutlinedIcon fontSize="small" />}
-              items={controllerItems}
-              open={controllerOpen}
-              onToggle={() => setControllerOpen((v) => !v)}
-            />
+          {isAccountant ? (
+            <NavSection label="AJE portal" icon={<ReceiptLongOutlinedIcon fontSize="small" />} items={portalItems} open onToggle={() => {}} />
+          ) : (
+            <>
+              <NavSection
+                label="Financial"
+                icon={<AssessmentOutlinedIcon fontSize="small" />}
+                items={financialItems}
+                open={financialOpen}
+                onToggle={() => setFinancialOpen((v) => !v)}
+              />
+              {isControllerOwner && (
+                <NavSection
+                  label="Controller"
+                  icon={<FactCheckOutlinedIcon fontSize="small" />}
+                  items={controllerItems}
+                  open={controllerOpen}
+                  onToggle={() => setControllerOpen((v) => !v)}
+                />
+              )}
+            </>
           )}
         </List>
       </Box>

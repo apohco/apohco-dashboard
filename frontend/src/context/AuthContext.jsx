@@ -127,6 +127,8 @@ export function AuthProvider({ children }) {
     groupId: user?.groupId ?? null,
     groups: user?.groups ?? [],
     isControllerOwner: user?.role === 'SoftwareAdmin' && (user?.groups ?? []).includes('ControllerOwner'),
+    // Accountant logins see only the AJE portal (the API enforces the same).
+    isAccountant: user?.role === 'Accountant',
     signIn,
     confirmSignInStep,
     // Kept for existing callers: a new password is just a sign-in challenge answer.

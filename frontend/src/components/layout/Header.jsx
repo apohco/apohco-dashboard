@@ -15,7 +15,7 @@ import { useAuth } from '../../context/AuthContext';
 
 export default function Header() {
   const navigate = useNavigate();
-  const { user, signOut } = useAuth();
+  const { user, signOut, isAccountant } = useAuth();
   const [anchorEl, setAnchorEl] = useState(null);
 
   const initials = user?.username ? user.username.slice(0, 2).toUpperCase() : 'U';
@@ -46,14 +46,16 @@ export default function Header() {
             >
               My Profile
             </MenuItem>
-            <MenuItem
-              onClick={() => {
-                setAnchorEl(null);
-                navigate('/settings');
-              }}
-            >
-              Settings
-            </MenuItem>
+            {!isAccountant && (
+              <MenuItem
+                onClick={() => {
+                  setAnchorEl(null);
+                  navigate('/settings');
+                }}
+              >
+                Settings
+              </MenuItem>
+            )}
             <Divider />
             <MenuItem
               onClick={async () => {

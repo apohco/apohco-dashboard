@@ -49,3 +49,23 @@ describe('RequireControllerOwner', () => {
     expect(screen.getByText('Controller page')).toBeInTheDocument();
   });
 });
+
+describe('accountant logins', () => {
+  test('see only the AJE portal in the sidebar', () => {
+    mockAuth.isControllerOwner = false;
+    mockAuth.isAccountant = true;
+    render(<MemoryRouter><Sidebar /></MemoryRouter>);
+    expect(screen.getByText('AJE portal')).toBeInTheDocument();
+    expect(screen.queryByText('Profit & Loss')).not.toBeInTheDocument();
+    expect(screen.queryByText('Controller')).not.toBeInTheDocument();
+    mockAuth.isAccountant = false;
+  });
+
+  test('the Controller owner sees Accountants and Accountant activity', () => {
+    mockAuth.isControllerOwner = true;
+    mockAuth.isAccountant = false;
+    render(<MemoryRouter><Sidebar /></MemoryRouter>);
+    expect(screen.getByText('Accountants')).toBeInTheDocument();
+    expect(screen.getByText('Accountant activity')).toBeInTheDocument();
+  });
+});

@@ -1,5 +1,5 @@
 const { requireAuth } = require('../../../shared/verifyToken');
-const { requireGroupAccess } = require('../../../shared/authorize');
+const { requireRole, requireGroupAccess, DASHBOARD_ROLES } = require('../../../shared/authorize');
 const { json, withErrorHandling } = require('../../../shared/response');
 const {
   resolveEntity,
@@ -54,6 +54,7 @@ function buildAmountsByGroupingId(periods, rowsByPeriodLabel) {
 // Returns { configured: false } if no view/layout has been set up yet.
 exports.handler = withErrorHandling(async (event) => {
   const claims = await requireAuth(event);
+  requireRole(claims, DASHBOARD_ROLES);
   const { groupId, entityType, entityId, periods, detailLevel = 'summary', reportViewId } = JSON.parse(
     event.body || '{}'
   );

@@ -1334,6 +1334,182 @@ Resources:
             RestApiId: !Ref ApohcoDashboardApi
             Path: /api/controller/aje/check-posted
             Method: post
+        Rollup:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/controller/aje/rollup
+            Method: get
+        Reply:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/controller/aje/entries/{entryId}/comments
+            Method: post
+
+  # --- Accountant AJE portal (Phase 5b). The ONLY function the Accountant
+  # role can use (portalData.authorizePortal); every other route refuses it
+  # via authorize.requireGroupAccess. No Google key, no Cognito admin rights:
+  # it reads AJE reports and their saved support, records status and
+  # comments, and queues notification emails for ctrlNotifyWorker. ---
+  CtrlPortalFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: ctrlPortal
+      Handler: src/functions/controller/ctrlPortal/index.handler
+      MemorySize: 1024
+      Timeout: 29
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: secretsmanager:GetSecretValue
+              Resource:
+                - !Ref DbCredentialsSecretArn
+                - !Ref AppSecretsArn
+            - Effect: Allow
+              Action: s3:GetObject
+              Resource: !Sub ${EvidenceBucket.Arn}/*
+            - Effect: Allow
+              Action: s3:PutObject
+              Resource: !Sub ${EvidenceBucket.Arn}/aje-exports/*
+        - VPCAccessPolicy: {}
+      Environment:
+        Variables:
+          COGNITO_USER_POOL_ID: !Ref ApohcoUserPool
+          COGNITO_CLIENT_ID: !Ref ApohcoUserPoolClient
+          EVIDENCE_BUCKET: !Ref EvidenceBucket
+      Events:
+        Reports:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/controller/portal/reports
+            Method: get
+        Report:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/controller/portal/reports/{reportId}
+            Method: get
+        Status:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/controller/portal/entries/{entryId}/status
+            Method: put
+        Comment:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/controller/portal/entries/{entryId}/comments
+            Method: post
+        Doc:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/controller/portal/reports/{reportId}/docs/{savedId}
+            Method: get
+        Export:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/controller/portal/reports/{reportId}/export
+            Method: post
+
+  # Controller > Accountants: invite and manage portal logins (Controller
+  # owner only). Needs Cognito admin rights for accountant users.
+  CtrlAccountantsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: ctrlAccountants
+      Handler: src/functions/controller/ctrlAccountants/index.handler
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: secretsmanager:GetSecretValue
+              Resource:
+                - !Ref DbCredentialsSecretArn
+                - !Ref AppSecretsArn
+            - Effect: Allow
+              Action:
+                - cognito-idp:AdminGetUser
+                - cognito-idp:AdminCreateUser
+                - cognito-idp:AdminUpdateUserAttributes
+                - cognito-idp:AdminDisableUser
+                - cognito-idp:AdminEnableUser
+                - cognito-idp:AdminSetUserMFAPreference
+                - cognito-idp:AdminResetUserPassword
+                - cognito-idp:AdminUserGlobalSignOut
+              Resource: !GetAtt ApohcoUserPool.Arn
+        - VPCAccessPolicy: {}
+      Environment:
+        Variables:
+          COGNITO_USER_POOL_ID: !Ref ApohcoUserPool
+          COGNITO_CLIENT_ID: !Ref ApohcoUserPoolClient
+      Events:
+        List:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/controller/accountants
+            Method: get
+        Invite:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/controller/accountants
+            Method: post
+        Update:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/controller/accountants/{accountantId}
+            Method: put
+        Action:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/controller/accountants/{accountantId}/{action}
+            Method: post
+        NotifySettings:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/controller/accountant-settings
+            Method: put
+        NotifyTest:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApohcoDashboardApi
+            Path: /api/controller/accountant-settings/test
+            Method: post
+
+  # Sends queued portal notification emails from the Google Workspace admin
+  # mailbox (gmail.send). Only runs work when notifications are turned on.
+  CtrlNotifyWorkerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: ctrlNotifyWorker
+      Handler: src/functions/controller/ctrlNotifyWorker/index.handler
+      Timeout: 120
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: secretsmanager:GetSecretValue
+              Resource:
+                - !Ref DbCredentialsSecretArn
+                - !Ref AppSecretsArn
+                - !Sub arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:apohco-dashboard/google-service-account-*
+        - VPCAccessPolicy: {}
+      Environment:
+        Variables:
+          GOOGLE_SA_SECRET_ID: apohco-dashboard/google-service-account
+      Events:
+        EveryFiveMinutes:
+          Type: Schedule
+          Properties:
+            Schedule: rate(5 minutes)
+            Description: Send queued accountant portal notification emails
 
   ManageCtrlVendorsFunction:
     Type: AWS::Serverless::Function

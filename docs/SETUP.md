@@ -647,6 +647,74 @@ How it works:
   every entry in that report. **Check GL now** re-checks the stored months.
   This only reads the stored GL; it never writes to QuickBooks.
 
+### 9.13 Accountant AJE portal (Phase 5b)
+
+Migration `017_controller_portal.sql` adds the portal tables and allows the
+`Accountant` role in `Users`. Apply it before deploying.
+
+**Adding the accounting team**: Controller → **Accountants** → **Add
+accountant**, once per person (a team can have as many as you like).
+Enter their name, email, a username (suggested from the email) and,
+optionally, the firm. Choose what they can see: **All files** in the Group,
+including files added later, or **Only these files**. Cognito emails them an
+invite with a temporary password; at first sign-in they choose a password
+and set up an authenticator app, the same as every other login.
+
+How an accountant's access is enforced:
+
+- Their Cognito login has `custom:role = Accountant` and **no**
+  `custom:groupId`. Every dashboard route refuses that role
+  (`authorize.requireGroupAccess` only accepts the five dashboard roles), so
+  they can't open the P&L, settings or any Controller page.
+  `test/guards/accountantIsolation.test.js` calls every API route in
+  `template.yaml` as an accountant and expects 403.
+- Only the `ctrlPortal` function (`/api/controller/portal/...`) accepts them.
+  It checks `CtrlAccountants` on every request (so **Deactivate** works at
+  once, even before their token expires), then the report's Group and file
+  against `CtrlAccountantAccess`.
+- Accountant logins appear in Settings → Users marked **AJE portal**, but
+  they can only be changed from Controller → Accountants.
+- Accountants are deactivated, never deleted, so their statuses and comments
+  keep a name. Removing their access to a Group keeps the login.
+
+**What accountants see** (the portal: they land on it when they sign in):
+every report published for their files, with its entries, lines, QBO Num,
+memo, backup lines and saved support PDFs. A support PDF opens through a
+5-minute signed link from the app's own bucket; they never get access to
+Google Drive, and their exports leave out Drive folder names. For each
+entry they set **Not worked / Booked / Declined** (Declined needs a reason)
+and can ask a question. A report that was superseded stays visible but is
+read-only. Every view, status change, comment, document link and export is
+written to `CtrlAuditLog` (actions `portal.*`).
+
+**Your side**:
+
+- Controller → **Accountant activity**: totals, the questions waiting for
+  you (reply in place), each report in force with Not worked / Booked /
+  Declined / Booked but not yet seen in the GL / open questions, and recent
+  activity. A question stays open until you reply.
+- Controller → AJE reports → a report: each entry shows the accountant's
+  status, a declined entry's reason, and its thread with a **Reply** box.
+
+**Email notifications (optional, off by default)**: Controller →
+Accountants → **Email notifications**. Needs Google Workspace connected,
+plus one more scope on the service account's domain-wide delegation
+(admin.google.com → Security → Access and data control → API controls →
+Manage Domain Wide Delegation → edit the client → add):
+
+```
+https://www.googleapis.com/auth/gmail.send
+```
+
+Emails are sent from the Google Workspace admin mailbox: to accountants when
+a report is published for their files or you answer their question (each
+accountant can be opted out), and to you (or the "Send questions to"
+address) when an accountant asks. Use **Send test email** to check it. The
+portal only queues emails (`CtrlNotifications`). `ctrlNotifyWorker` sends
+them every 5 minutes and is the only portal-related function with the
+Google key. A failed send is retried up to 5 times, and a failure never
+blocks the status change or comment that triggered it.
+
 ## 10. Before Phase 4: Google Workspace (Gmail and Drive evidence)
 
 Phase 4 searches Gmail and Drive for invoices and receipts that support a

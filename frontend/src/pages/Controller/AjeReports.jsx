@@ -41,13 +41,14 @@ import {
   getAjeReport,
   getSavedEvidenceDownload,
   publishAjeReport,
+  replyToAjeEntry,
   saveAjeSettings,
 } from '../../api/controller';
+import { BackupTable, EntryLinesTable, EntryThread, PortalStatusChips, describeState } from '../../components/aje/AjeParts';
 import { formatMonth, isMonth } from '../../utils/months';
 import { formatCurrency } from '../../utils/format';
 
 const errorText = (err) => err?.response?.data?.message || err?.message;
-const acct = (code, name) => [code, name].filter(Boolean).join(' ');
 const pad = (n, w) => String(n).padStart(w, '0');
 
 // "MGMT-2026-10-AJE-003": the number the next report will get.
@@ -56,11 +57,7 @@ export function nextReportNumber(fileCode, month, reports, qboId) {
   return `${fileCode}-${month}-AJE-${pad((seqs.length ? Math.max(...seqs) : 0) + 1, 3)}`;
 }
 
-// A state ([{ code, name, className, amount }]) in a few words.
-export function describeState(state) {
-  if (!state || !state.length) return '—';
-  return state.map((p) => `${acct(p.code, p.name)}${p.className ? ` · ${p.className}` : ''}`).join(' / ');
-}
+export { describeState };
 
 // Posted status of a report, for the list.
 export function postedLabel(report) {
@@ -75,60 +72,6 @@ export function revisableReportId(reports, report) {
   const live = reports.filter((r) => r.qboId === report.qboId && r.month === report.month && r.status === 'Published');
   if (!live.length) return null;
   return live.reduce((a, b) => (b.seq > a.seq ? b : a)).reportId;
-}
-
-function EntryLinesTable({ lines }) {
-  return (
-    <Table size="small" sx={{ mb: 1 }}>
-      <TableHead>
-        <TableRow>
-          <TableCell>Account</TableCell>
-          <TableCell>Class</TableCell>
-          <TableCell align="right">Debit</TableCell>
-          <TableCell align="right">Credit</TableCell>
-        </TableRow>
-      </TableHead>
-      <TableBody>
-        {lines.map((l, i) => (
-          <TableRow key={i}>
-            <TableCell>{acct(l.accountCode, l.accountName)}</TableCell>
-            <TableCell>{l.className || ''}</TableCell>
-            <TableCell align="right">{l.debit ? formatCurrency(l.debit) : ''}</TableCell>
-            <TableCell align="right">{l.credit ? formatCurrency(l.credit) : ''}</TableCell>
-          </TableRow>
-        ))}
-      </TableBody>
-    </Table>
-  );
-}
-
-function BackupTable({ sources }) {
-  return (
-    <Table size="small">
-      <TableHead>
-        <TableRow>
-          <TableCell>Date</TableCell>
-          <TableCell>Payee</TableCell>
-          <TableCell>Memo</TableCell>
-          <TableCell align="right">Amount</TableCell>
-          <TableCell>From</TableCell>
-          <TableCell>To</TableCell>
-        </TableRow>
-      </TableHead>
-      <TableBody>
-        {sources.map((s) => (
-          <TableRow key={`${s.side}-${s.sourceQboId}-${s.fingerprint}`}>
-            <TableCell>{s.txnDate}</TableCell>
-            <TableCell>{s.payeeName}</TableCell>
-            <TableCell sx={{ maxWidth: 220 }}>{s.memo}</TableCell>
-            <TableCell align="right">{formatCurrency(s.amount)}</TableCell>
-            <TableCell>{s.side === 'Mirror' ? 'Other entity\'s file' : describeState(s.from)}</TableCell>
-            <TableCell>{describeState(s.to)}</TableCell>
-          </TableRow>
-        ))}
-      </TableBody>
-    </Table>
-  );
 }
 
 function SupportLinks({ groupId, support, onError }) {
@@ -278,7 +221,11 @@ function ReportDialog({ groupId, reportId, onClose, onRevise, canRevise, onError
                   ) : (
                     <Chip size="small" variant="outlined" label="Not seen in GL yet" />
                   )}
+                  <PortalStatusChips portal={e.portal} />
                 </Stack>
+                {e.portal?.status === 'Declined' && e.portal.reason && (
+                  <Alert severity="error" sx={{ mb: 1, py: 0 }}>Declined by {e.portal.setBy}: {e.portal.reason}</Alert>
+                )}
                 <EntryLinesTable lines={e.lines} />
                 <Stack direction="row" spacing={1} alignItems="flex-start" sx={{ mb: 1 }}>
                   <Typography variant="body2" sx={{ flex: 1 }}>Memo: {e.memo}</Typography>
@@ -291,6 +238,23 @@ function ReportDialog({ groupId, reportId, onClose, onRevise, canRevise, onError
                 <Box sx={{ mt: 1 }}>
                   <SupportLinks groupId={groupId} support={e.support} onError={onError} />
                 </Box>
+                {(e.thread?.length > 0) && (
+                  <EntryThread
+                    thread={e.thread}
+                    entryNumber={e.entryNumber}
+                    sendLabel="Reply"
+                    placeholder="Answer the accountant"
+                    onSend={async (body) => {
+                      try {
+                        await replyToAjeEntry(groupId, e.entryId, body);
+                        await load();
+                      } catch (err) {
+                        onError(err);
+                        throw err;
+                      }
+                    }}
+                  />
+                )}
               </Paper>
             ))}
           </>

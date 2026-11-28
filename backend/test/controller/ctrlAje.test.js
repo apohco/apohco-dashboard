@@ -378,3 +378,73 @@ describe('GET /aje (overview)', () => {
     expect(body.reports[0]).toMatchObject({ reportNumber: 'MGMT-2026-10-AJE-001', postedCount: 1 });
   });
 });
+
+describe('accountant portal (controller side)', () => {
+  const ENTRY = '55555555-5555-4555-8555-555555555555';
+
+  test('publishing with email on tells each accountant who can see the file', async () => {
+    const lines = [glLine({ fingerprint: 'f1' })];
+    db.query.mockImplementation(sqlRouter(routes({ ownLines: lines })));
+    const keys = parseBody(await handler(draftEvent())).entries.map((e) => e.key);
+    process.env.FRONTEND_URL = 'https://app.example.com';
+    db.query.mockImplementation(sqlRouter(routes({
+      ownLines: lines,
+      extra: [
+        [/COALESCE\(MAX\(Seq\), 0\) \+ 1/, { rows: [{ seq: 1 }] }],
+        [/INSERT INTO CtrlAjeReports/, { rows: [{ reportid: REPORT, publishedat: new Date() }] }],
+        [/INSERT INTO CtrlAjeEntries/, { rows: [{ entryid: 'e1', seq: 1 }] }],
+        [/FROM Groups grp\s+LEFT JOIN CtrlNotifySettings/, { rows: [{ emailenabled: true, controlleremail: null, adminemail: 'admin@apohco.com' }] }],
+        [/FROM CtrlAccountants a\s+JOIN CtrlAccountantAccess x/, { rows: [{ fullname: 'Casey', email: 'casey@firm.com' }] }],
+      ],
+    })));
+    const res = await handler(apiEvent({ method: 'POST', resource: '/api/controller/aje/reports', body: { groupId: G, qboId: MGMT, month: '2026-10', grouping: 'Grouped', expectedKeys: keys, include: [{ key: keys[0] }] } }));
+    expect(res.statusCode).toBe(201);
+    const queued = db.query.mock.calls.find(([s]) => /INSERT INTO CtrlNotifications/.test(s))[1];
+    expect(queued.slice(0, 3)).toEqual([G, 'ReportPublished', 'casey@firm.com']);
+    expect(queued[4]).toContain(`https://app.example.com/portal/reports/${REPORT}`);
+    expect(queued[4]).toContain('APOHCO Management, October 2026');
+  });
+
+  test('report detail includes each entry\'s accountant status and thread', async () => {
+    db.query.mockImplementation(sqlRouter([
+      [/FROM CtrlAjeReports r\s+JOIN QBOs q[\s\S]*WHERE r.ReportId = \$1 AND r.GroupId = \$2/, { rows: [REPORT_ROW] }],
+      [/FROM CtrlAjeEntries e\s+LEFT JOIN LATERAL/, { rows: [ENTRY_ROW] }],
+      [/SELECT DISTINCT ON \(EntryId\) EntryId, Status, Reason/, { rows: [{ entryid: 'e1', status: 'Declined', reason: 'Wrong period', setbyname: 'Casey', setat: '2026-11-27' }] }],
+      [/SELECT CommentId, EntryId, AuthorName/, { rows: [{ commentid: 'c1', entryid: 'e1', authorname: 'Casey', authorrole: 'Accountant', body: 'Why?', createdat: '2026-11-27' }] }],
+      [/SELECT EntryId, COUNT\(\*\) AS comments/, { rows: [{ entryid: 'e1', comments: '1', lastat: '2026-11-27', lastrole: 'Accountant' }] }],
+    ]));
+    const body = parseBody(await handler(apiEvent({ resource: '/api/controller/aje/reports/{reportId}', query: { groupId: G }, path: { reportId: REPORT } })));
+    expect(body.entries[0].portal).toMatchObject({ status: 'Declined', reason: 'Wrong period', questionOpen: true });
+    expect(body.entries[0].thread).toEqual([expect.objectContaining({ authorName: 'Casey', body: 'Why?' })]);
+    for (const [, params] of db.query.mock.calls) expect(params).toContain(G);
+  });
+
+  test('rollup: in-force reports with counts, open questions, recent activity', async () => {
+    db.query.mockImplementation(sqlRouter([
+      [/FROM CtrlAjeReports r\s+JOIN QBOs q[\s\S]*WHERE r.GroupId = \$1/, { rows: [REPORT_ROW, { ...REPORT_ROW, reportid: 'old', status: 'Superseded', reportnumber: 'OLD' }] }],
+      [/WITH st AS/, { rows: [{ reportid: REPORT, notworked: '0', booked: '1', declined: '0', bookedunconfirmed: '1', openquestions: '0' }] }],
+      [/WITH last AS/, { rows: [] }],
+      [/SELECT \* FROM \(/, { rows: [{ kind: 'status', at: '2026-11-27', who: 'Casey', status: 'Booked', text: null, entrynumber: 'MGMT-2026-10-AJE-001.01', reportid: REPORT }] }],
+      [/SELECT a.AccountantId, a.FullName/, { rows: [{ accountantid: 'a1', fullname: 'Casey', firm: null, active: true }] }],
+    ]));
+    const body = parseBody(await handler(apiEvent({ resource: '/api/controller/aje/rollup', query: { groupId: G } })));
+    expect(body.reports.map((r) => r.reportNumber)).toEqual(['MGMT-2026-10-AJE-001']);
+    expect(body.totals).toEqual({ notWorked: 0, booked: 1, declined: 0, bookedUnconfirmed: 1, openQuestions: 0 });
+    expect(body.activity[0]).toMatchObject({ kind: 'status', statusLabel: 'Booked', who: 'Casey' });
+    expect(body.accountants).toHaveLength(1);
+  });
+
+  test('answering a question is saved as the controller and logged', async () => {
+    db.query.mockImplementation(sqlRouter([
+      [/FROM CtrlAjeEntries e JOIN CtrlAjeReports r ON r.ReportId = e.ReportId JOIN QBOs/, { rows: [{ entryid: ENTRY, reportid: REPORT, groupid: G, qboid: MGMT, entrynumber: 'MGMT-2026-10-AJE-001.01', reportnumber: 'MGMT-2026-10-AJE-001', reportstatus: 'Published', qboname: 'APOHCO Management' }] }],
+      [/INSERT INTO CtrlAjeComments/, { rows: [{ commentid: 'c2', createdat: '2026-11-28' }] }],
+    ]));
+    const reply = (groupId) => handler(apiEvent({ method: 'POST', resource: '/api/controller/aje/entries/{entryId}/comments', path: { entryId: ENTRY }, body: { groupId, body: 'Use Lebanon.' } }));
+    const res = await reply(G);
+    expect(res.statusCode).toBe(201);
+    expect(db.query.mock.calls.find(([s]) => /INSERT INTO CtrlAjeComments/.test(s))[1]).toEqual([ENTRY, REPORT, G, 'user-paul', 'paul', 'Controller', 'Use Lebanon.']);
+    expect(sqlOf(db.query).some((s) => /INSERT INTO CtrlAuditLog/.test(s))).toBe(true);
+    // An entry from another Group is not found.
+    expect((await reply('99999999-9999-4999-8999-999999999999')).statusCode).toBe(404);
+  });
+});

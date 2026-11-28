@@ -158,6 +158,24 @@ describe('PUT update', () => {
     expect(cognito.updateAttributes).not.toHaveBeenCalled();
   });
 
+  test('accountant portal logins are managed in Controller > Accountants, not here', async () => {
+    const cpa = cUser('casey.cpa', { sub: 's-cpa', email: 'c@firm.com', email_verified: 'true', 'custom:role': 'Accountant' });
+    setup({ users: [paul, cpa], controllerOwners: [] });
+    const res = await update('casey.cpa', { role: 'Owner', groupId: GROUP });
+    expect(res.statusCode).toBe(409);
+    expect(cognito.updateAttributes).not.toHaveBeenCalled();
+    const disable = await handler(apiEvent({ method: 'POST', resource: '/api/settings/users/{username}/{action}', path: { username: 'casey.cpa', action: 'disable' } }));
+    expect(disable.statusCode).toBe(409);
+    expect(cognito.disableUser).not.toHaveBeenCalled();
+  });
+
+  test('inviting with the Accountant role is refused here', async () => {
+    setup({ users: [paul] });
+    const res = await handler(apiEvent({ method: 'POST', resource: '/api/settings/users', body: { username: 'cpa2', email: 'c2@firm.com', role: 'Accountant' } }));
+    expect(res.statusCode).toBe(400);
+    expect(cognito.createUser).not.toHaveBeenCalled();
+  });
+
   test("an admin can't change their own role", async () => {
     setup({ users: [paul, otherAdmin], controllerOwners: [] });
     const res = await update('paul', { role: 'Owner', groupId: GROUP });
